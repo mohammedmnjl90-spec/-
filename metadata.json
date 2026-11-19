@@ -1,0 +1,6 @@
+{
+  "name": "ميدان المعرفة - المسابقات الثقافية التنافسية",
+  "description": "منصة مسابقات ثقافية وتنافسية بنظام الجولات السريعة وقائمة المتصدرين الشهرية مع آلاف الأسئلة في مختلف الأقسام المعرفية.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

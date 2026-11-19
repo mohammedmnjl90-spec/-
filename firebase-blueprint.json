@@ -1,0 +1,448 @@
+{
+  "entities": {
+    "PlayerProfile": {
+      "title": "Player Profile (Private Owner Document)",
+      "description": "Private authenticated player profile document in Peak of Challenge containing personal contact info, coins, and fairPlayScore. Readable only by owner.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID (must match request.auth.uid)",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "playerId": {
+          "type": "string",
+          "description": "Unique 10-digit player identifier",
+          "minLength": 10,
+          "maxLength": 10,
+          "pattern": "^[0-9]{10}$"
+        },
+        "username": {
+          "type": "string",
+          "description": "Unique display username",
+          "minLength": 2,
+          "maxLength": 24
+        },
+        "usernameNormalized": {
+          "type": "string",
+          "description": "Lowercase normalized username key",
+          "minLength": 2,
+          "maxLength": 24
+        },
+        "countryCode": {
+          "type": "string",
+          "description": "ISO 2-letter country code",
+          "minLength": 2,
+          "maxLength": 4
+        },
+        "countryName": {
+          "type": "string",
+          "description": "Country display name",
+          "minLength": 2,
+          "maxLength": 50
+        },
+        "countryFlag": {
+          "type": "string",
+          "description": "Country flag emoji",
+          "minLength": 1,
+          "maxLength": 16
+        },
+        "monthlyRoundPoints": {
+          "type": "number",
+          "description": "Official monthly leaderboard points (max +2 per single round update, 25s rate limit)"
+        },
+        "coins": {
+          "type": "number",
+          "description": "Gold coins balance (client delta capped at <= 120)"
+        },
+        "xp": {
+          "type": "number",
+          "description": "Experience points"
+        },
+        "level": {
+          "type": "number",
+          "description": "Player level"
+        },
+        "rankTitle": {
+          "type": "string",
+          "description": "Player rank title",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "vipTier": {
+          "type": "string",
+          "enum": ["none", "bronze", "silver", "gold", "legend"],
+          "description": "Current VIP subscription tier (locked against direct client modification)"
+        },
+        "adsRemoved": {
+          "type": "boolean",
+          "description": "Whether ads are permanently disabled via server-verified VIP"
+        },
+        "fairPlayScore": {
+          "type": "number",
+          "description": "Anti-cheat integrity score (starts at 100, cannot be increased by client)"
+        },
+        "lastProfileEditAt": {
+          "type": "number",
+          "description": "Epoch milliseconds of last username/country edit (50-day cooldown enforced)"
+        },
+        "updatedAtMs": {
+          "type": "number",
+          "description": "Server timestamp in milliseconds used for 25-second points rate limiting"
+        }
+      },
+      "required": [
+        "uid",
+        "playerId",
+        "username",
+        "usernameNormalized",
+        "countryCode",
+        "countryName",
+        "countryFlag",
+        "monthlyRoundPoints",
+        "coins",
+        "xp",
+        "level",
+        "rankTitle",
+        "vipTier",
+        "adsRemoved",
+        "fairPlayScore",
+        "lastProfileEditAt",
+        "updatedAtMs"
+      ]
+    },
+    "LeaderboardPublicEntry": {
+      "title": "Public Leaderboard Profile",
+      "description": "Publicly readable non-sensitive player summary for monthly leaderboard and friend search (excludes email, phone, coins, fairPlayScore).",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "playerId": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10
+        },
+        "username": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 24
+        },
+        "usernameNormalized": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 24
+        },
+        "countryCode": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 4
+        },
+        "countryName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 50
+        },
+        "countryFlag": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16
+        },
+        "monthlyRoundPoints": {
+          "type": "number"
+        },
+        "level": {
+          "type": "number"
+        },
+        "rankTitle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "vipTier": {
+          "type": "string",
+          "enum": ["none", "bronze", "silver", "gold", "legend"]
+        },
+        "updatedAtMs": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "uid",
+        "playerId",
+        "username",
+        "countryCode",
+        "countryName",
+        "countryFlag",
+        "monthlyRoundPoints",
+        "level",
+        "rankTitle",
+        "vipTier",
+        "updatedAtMs"
+      ]
+    },
+    "UsernameReservation": {
+      "title": "Username Reservation",
+      "description": "Global unique username lock mapping normalized username to owner UID and 10-digit playerId.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "username": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 24
+        },
+        "playerId": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10
+        },
+        "createdAt": {
+          "type": "number"
+        }
+      },
+      "required": ["uid", "username", "playerId", "createdAt"]
+    },
+    "ChatThread": {
+      "title": "Private Chat Thread",
+      "description": "Metadata document for private chat restricting access strictly to participants ([senderUid, receiverUid]).",
+      "type": "object",
+      "properties": {
+        "chatId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "participants": {
+          "type": "array",
+          "description": "Array of two Firebase Auth UIDs [senderUid, receiverUid]"
+        },
+        "participantPlayerIds": {
+          "type": "array",
+          "description": "Array of two 10-digit player IDs"
+        },
+        "updatedAtMs": {
+          "type": "number"
+        }
+      },
+      "required": ["chatId", "participants", "updatedAtMs"]
+    },
+    "ChatMessage": {
+      "title": "Private Chat Message",
+      "description": "Real-time private message inside a friend conversation thread protected by participants array.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "threadId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "participants": {
+          "type": "array",
+          "description": "Array of two Firebase Auth UIDs [senderUid, receiverUid]"
+        },
+        "senderUid": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "senderId": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "receiverId": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "createdAtIso": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "createdAtMs": {
+          "type": "number"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["sent", "delivered", "read"]
+        }
+      },
+      "required": [
+        "id",
+        "threadId",
+        "participants",
+        "senderUid",
+        "senderId",
+        "receiverId",
+        "text",
+        "createdAtIso",
+        "createdAtMs",
+        "status"
+      ]
+    },
+    "VipVerificationRequest": {
+      "title": "VIP Receipt Verification Request",
+      "description": "Submitted IAP purchase receipt awaiting or processed by Cloud Function / Server Verification.",
+      "type": "object",
+      "properties": {
+        "transactionId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "uid": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "playerId": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10
+        },
+        "productId": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "tier": {
+          "type": "string",
+          "enum": ["bronze", "silver", "gold", "legend"]
+        },
+        "storeProvider": {
+          "type": "string",
+          "enum": ["google_play", "app_store"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending_server_verification", "verified", "rejected"]
+        },
+        "createdAtMs": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "transactionId",
+        "uid",
+        "playerId",
+        "productId",
+        "tier",
+        "storeProvider",
+        "status",
+        "createdAtMs"
+      ]
+    },
+    "SupportTicket": {
+      "title": "Customer Support Ticket",
+      "description": "Player support inquiry or report synced with administration.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "ticketNumber": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "uid": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "playerId": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10
+        },
+        "username": {
+          "type": "string",
+          "maxLength": 30
+        },
+        "category": {
+          "type": "string",
+          "enum": ["prizes", "technical", "suggestion", "complaint"]
+        },
+        "categoryLabel": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "subject": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "message": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 2000
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "replied"]
+        },
+        "replyText": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "createdAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "createdAtMs": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "ticketNumber",
+        "uid",
+        "playerId",
+        "username",
+        "category",
+        "categoryLabel",
+        "subject",
+        "message",
+        "status",
+        "createdAt",
+        "createdAtMs"
+      ]
+    }
+  },
+  "firestore": {
+    "/players/{uid}": {
+      "schema": { "$ref": "#/entities/PlayerProfile" },
+      "description": "Private authenticated player profiles readable strictly by the account owner."
+    },
+    "/leaderboard_public/{uid}": {
+      "schema": { "$ref": "#/entities/LeaderboardPublicEntry" },
+      "description": "Public read-only leaderboard projections containing only non-sensitive player fields."
+    },
+    "/usernames/{nameNormalized}": {
+      "schema": { "$ref": "#/entities/UsernameReservation" },
+      "description": "Global unique username reservations preventing duplicate names."
+    },
+    "/chats/{chatId}": {
+      "schema": { "$ref": "#/entities/ChatThread" },
+      "description": "Private chat thread documents accessible only to UIDs in participants."
+    },
+    "/chats/{chatId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/ChatMessage" },
+      "description": "Real-time private chat messages accessible only to UIDs in participants."
+    },
+    "/vip_verifications/{receiptId}": {
+      "schema": { "$ref": "#/entities/VipVerificationRequest" },
+      "description": "IAP purchase receipts submitted for server-side Cloud Function verification."
+    },
+    "/support_tickets/{ticketId}": {
+      "schema": { "$ref": "#/entities/SupportTicket" },
+      "description": "Customer support tickets and admin replies."
+    }
+  }
+}
