@@ -4,28 +4,35 @@ import {
   doc,
   getDoc,
   getDocs,
+  increment,
   limit,
   onSnapshot,
   orderBy,
   query,
+  serverTimestamp,
   setDoc,
   Unsubscribe,
+  updateDoc,
   where,
+  writeBatch,
 } from 'firebase/firestore';
 import {
   AppLanguage,
   BadgeDefinition,
   CategoryId,
   ChatMessage,
+  ChatThreadMeta,
   CountryInfo,
   DailyMission,
   DailyState,
   FriendContact,
+  FriendRequest,
   LeaderboardEntry,
   MatchHistoryRecord,
   PlayerProfile,
   SupportTicket,
   SupportTicketCategory,
+  UserPresence,
   VipPurchaseReceipt,
   VipTier,
 } from '../types/game';
@@ -271,8 +278,13 @@ export function normalizeUsernameKey(username: string): string {
     .replace(/[.#$[\]/]/g, '_');
 }
 
-export function buildCanonicalChatId(playerIdA: string, playerIdB: string): string {
-  return [playerIdA.trim(), playerIdB.trim()].sort().join('_');
+export function buildCanonicalChatId(idA: string, idB: string): string {
+  return [idA.trim(), idB.trim()].sort().join('_');
+}
+
+export function buildSortedUidPair(uidA: string, uidB: string): [string, string] {
+  const sorted = [uidA.trim(), uidB.trim()].sort();
+  return [sorted[0], sorted[1]];
 }
 
 export function generateUnique10DigitId(existingIds: string[] = []): string {
@@ -1718,24 +1730,163 @@ export class StorageRepository {
    * Searches Cloud Firestore (`players` collection) by 10-digit `playerId` or `usernameNormalized`
    * so players can add real friends from any device, with Offline-First fallback.
    */
-  public async addFriendByIdentifierAsync(
+  /**
+   * Looks up a real registered player in Cloud Firestore (`leaderboard_public` / `usernames`)
+   * by 10-digit `playerId`, `usernameNormalized`, or exact `username`.
+   */
+  private async findCloudPlayerByIdentifier(
+    rawIdentifier: string
+  ): Promise<{
+    uid: string;
+    playerId: string;
+    username: string;
+    country: CountryInfo;
+    level: number;
+    rankTitle: string;
+    rankTitleEn: string;
+    vipTier: VipTier;
+  } | null> {
+    const clean = rawIdentifier.trim();
+    const normKey = normalizeUsernameKey(clean);
+    const publicPlayersRef = collection(db, 'leaderboard_public');
+    const isTenDigitCode = /^\d{10}$/.test(clean);
+
+    const mapDoc = (uid: string, docData: Record<string, unknown>) => {
+      const resolvedCountry = resolveCountryByCode(
+        typeof docData.countryCode === 'string' ? docData.countryCode : undefined,
+        docData.country as CountryInfo | undefined
+      );
+      return {
+        uid: (typeof docData.uid === 'string' && docData.uid) || uid,
+        playerId: String(docData.playerId || ''),
+        username: String(docData.username || 'بطل'),
+        country: resolvedCountry,
+        level: Number(docData.level || 1),
+        rankTitle: String(docData.rankTitle || 'مبتدئ واعد'),
+        rankTitleEn: String(docData.rankTitleEn || 'Rising Challenger'),
+        vipTier: (docData.vipTier as VipTier) || 'none',
+      };
+    };
+
+    // 1. Query by 10-digit playerId or usernameNormalized in leaderboard_public
+    const primaryQuery = isTenDigitCode
+      ? query(publicPlayersRef, where('playerId', '==', clean), limit(1))
+      : query(publicPlayersRef, where('usernameNormalized', '==', normKey), limit(1));
+
+    const snap = await getDocs(primaryQuery);
+    if (!snap.empty) {
+      const d = snap.docs[0];
+      return mapDoc(d.id, d.data());
+    }
+
+    if (!isTenDigitCode) {
+      // 2. Fallback: look up exact username in leaderboard_public
+      const exactNameSnap = await getDocs(
+        query(publicPlayersRef, where('username', '==', clean), limit(1))
+      );
+      if (!exactNameSnap.empty) {
+        const d = exactNameSnap.docs[0];
+        return mapDoc(d.id, d.data());
+      }
+
+      // 3. Fallback: check global `usernames/{normKey}` reservation to retrieve UID
+      try {
+        const unameSnap = await getDoc(doc(db, 'usernames', normKey));
+        if (unameSnap.exists()) {
+          const unameData = unameSnap.data();
+          const targetUid = typeof unameData.uid === 'string' ? unameData.uid : '';
+          if (targetUid) {
+            const lbSnap = await getDoc(doc(db, 'leaderboard_public', targetUid));
+            if (lbSnap.exists()) {
+              return mapDoc(lbSnap.id, lbSnap.data());
+            }
+            return {
+              uid: targetUid,
+              playerId: String(unameData.playerId || '0000000000'),
+              username: String(unameData.username || clean),
+              country: COUNTRIES_LIST[0],
+              level: 1,
+              rankTitle: 'مبتدئ واعد',
+              rankTitleEn: 'Rising Challenger',
+              vipTier: 'none',
+            };
+          }
+        }
+      } catch {
+        // Ignore fallback error
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Fetches real active players from `leaderboard_public` for quick friend request suggestions.
+   */
+  public async fetchDiscoverableCloudPlayers(
+    myUid: string,
+    limitCount = 12
+  ): Promise<LeaderboardEntry[]> {
+    try {
+      const uid = myUid || (await ensureFirebaseAuthSession());
+      if (!uid) return [];
+      const snap = await getDocs(
+        query(collection(db, 'leaderboard_public'), limit(limitCount))
+      );
+      const list: LeaderboardEntry[] = [];
+      snap.forEach((docSnap) => {
+        const data = docSnap.data();
+        const docUid = (typeof data.uid === 'string' && data.uid) || docSnap.id;
+        if (!docUid || docUid === uid) return;
+        const country = resolveCountryByCode(
+          data.countryCode,
+          data.country as CountryInfo | undefined
+        );
+        list.push({
+          uid: docUid,
+          playerId: String(data.playerId || ''),
+          username: String(data.username || 'لاعب'),
+          country,
+          monthlyPoints: Number(data.monthlyRoundPoints || 0),
+          level: Number(data.level || 1),
+          rankTitle: String(data.rankTitle || 'مبتدئ واعد'),
+          rankTitleEn: String(data.rankTitleEn || 'Rising Challenger'),
+          vipTier: (data.vipTier as VipTier) || 'none',
+        });
+      });
+      list.sort((a, b) => b.monthlyPoints - a.monthlyPoints);
+      return list;
+    } catch (err) {
+      handleFirestoreError(err, OperationType.LIST, 'leaderboard_public/discover');
+      return [];
+    }
+  }
+
+  /**
+   * Sends a real-time Cloud Firestore Friend Request to another registered player.
+   * If the target player already sent a pending request to the current user,
+   * automatically accepts it so both players immediately become friends.
+   */
+  public async sendFriendRequestAsync(
     profile: PlayerProfile,
     rawIdentifier: string,
     lang: AppLanguage
   ): Promise<
-    { ok: true; profile: PlayerProfile; friend: FriendContact } | { ok: false; error: string }
+    | { ok: true; status: 'sent'; targetUsername: string }
+    | { ok: true; status: 'auto_accepted'; friend: FriendContact }
+    | { ok: false; error: string }
   > {
     const clean = rawIdentifier.trim();
     const lower = clean.toLowerCase();
     const normKey = normalizeUsernameKey(clean);
 
-    if (!clean || clean.length < 3) {
+    if (!clean || clean.length < 2) {
       return {
         ok: false,
         error:
           lang === 'en'
-            ? 'Please enter a valid 10-digit Player ID or username (at least 3 characters).'
-            : 'يرجى إدخال كود لاعب صحيح (10 أرقام) أو اسم مستخدم (3 أحرف على الأقل).',
+            ? 'Please enter a valid 10-digit Player ID or username.'
+            : 'يرجى إدخال كود لاعب صحيح (10 أرقام) أو اسم المستخدم.',
       };
     }
 
@@ -1748,465 +1899,904 @@ export class StorageRepository {
         ok: false,
         error:
           lang === 'en'
-            ? 'You cannot add yourself as a friend.'
-            : 'لا يمكنك إضافة حسابك الشخصي إلى قائمة الأصدقاء.',
+            ? 'You cannot send a friend request to yourself.'
+            : 'لا يمكنك إرسال طلب صداقة إلى حسابك الشخصي.',
       };
     }
 
-    const alreadyExists = profile.friends.some(
-      (f) =>
-        f.playerId.toLowerCase() === lower ||
-        f.username.trim().toLowerCase() === lower ||
-        normalizeUsernameKey(f.username) === normKey
-    );
-    if (alreadyExists) {
+    const myUid = auth.currentUser?.uid || (await ensureFirebaseAuthSession());
+    if (!myUid) {
       return {
         ok: false,
         error:
           lang === 'en'
-            ? 'This player is already in your friends list.'
-            : 'هذا اللاعب مضاف بالفعل في قائمة أصدقائك.',
+            ? 'Please sign in first to send friend requests.'
+            : 'يرجى تسجيل الدخول أولاً لإرسال طلبات الصداقة.',
       };
     }
 
-    // 1. Try searching Cloud Firestore `leaderboard_public` collection first (since `players` is owner-only)
     try {
-      await ensureFirebaseAuthSession();
-      const publicPlayersRef = collection(db, 'leaderboard_public');
-      const isTenDigitCode = /^\d{10}$/.test(clean);
-      const q = isTenDigitCode
-        ? query(publicPlayersRef, where('playerId', '==', clean), limit(1))
-        : query(publicPlayersRef, where('usernameNormalized', '==', normKey), limit(1));
-
-      const snap = await getDocs(q);
-      if (!snap.empty) {
-        const docData = snap.docs[0].data();
-        const resolvedCountry = resolveCountryByCode(
-          docData.countryCode,
-          docData.country as CountryInfo | undefined
-        );
-
-        const cloudFriend: FriendContact = {
-          uid: docData.uid || snap.docs[0].id,
-          playerId: docData.playerId,
-          username: docData.username,
-          country: resolvedCountry,
-          level: docData.level || 1,
-          rankTitle: docData.rankTitle || 'مبتدئ واعد',
-          rankTitleEn: docData.rankTitleEn || 'Rising Challenger',
-          vipTier: (docData.vipTier as VipTier) || 'none',
-          addedAtIso: new Date().toISOString(),
-          isOnline: true,
-          unreadCount: 1,
+      const target = await this.findCloudPlayerByIdentifier(clean);
+      if (!target) {
+        return {
+          ok: false,
+          error:
+            lang === 'en'
+              ? 'No registered player found with this Player ID or username. Please verify and try again.'
+              : 'لم يتم العثور على لاعب مسجّل بهذا الكود أو اسم المستخدم. تأكد من كتابته بشكل صحيح.',
         };
-
-        return this.finalizeAddFriend(profile, cloudFriend, lang);
       }
+
+      if (target.uid === myUid || target.playerId === profile.playerId) {
+        return {
+          ok: false,
+          error:
+            lang === 'en'
+              ? 'You cannot send a friend request to yourself.'
+              : 'لا يمكنك إرسال طلب صداقة إلى حسابك الشخصي.',
+        };
+      }
+
+      const sortedParticipants = buildSortedUidPair(myUid, target.uid);
+      const pairId = sortedParticipants.join('_');
+
+      // 1. Check if already mutual friends in Firestore
+      const friendshipSnap = await getDoc(doc(db, 'friendships', pairId));
+      if (friendshipSnap.exists()) {
+        return {
+          ok: false,
+          error:
+            lang === 'en'
+              ? `You and "${target.username}" are already friends!`
+              : `أنت و«${target.username}» أصدقاء بالفعل!`,
+        };
+      }
+
+      // 2. Check if the target player already sent us a pending friend request -> auto-accept!
+      const reverseReqId = `${target.uid}_${myUid}`;
+      const reverseSnap = await getDoc(doc(db, 'friend_requests', reverseReqId));
+      if (reverseSnap.exists()) {
+        const reverseData = reverseSnap.data() as FriendRequest;
+        if (reverseData.status === 'pending') {
+          const accepted = await this.acceptFriendRequestAsync(profile, reverseData, lang);
+          if (accepted.ok) {
+            return { ok: true, status: 'auto_accepted', friend: accepted.friend };
+          }
+        }
+      }
+
+      // 3. Check if we already sent a pending request
+      const myReqId = `${myUid}_${target.uid}`;
+      const myReqRef = doc(db, 'friend_requests', myReqId);
+      const myReqSnap = await getDoc(myReqRef);
+      const nowMs = Date.now();
+
+      if (myReqSnap.exists()) {
+        const existingData = myReqSnap.data() as FriendRequest;
+        if (existingData.status === 'pending') {
+          return {
+            ok: false,
+            error:
+              lang === 'en'
+                ? `A friend request to "${target.username}" is already pending.`
+                : `لقد أرسلت طلب صداقة إلى «${target.username}» بالفعل وبانتظار قبوله.`,
+          };
+        }
+        if (existingData.status === 'rejected') {
+          await updateDoc(myReqRef, {
+            status: 'pending',
+            updatedAtMs: nowMs,
+          });
+          return { ok: true, status: 'sent', targetUsername: target.username };
+        }
+        // If previously accepted (e.g. unfriended then re-adding), remove old record first
+        await deleteDoc(myReqRef);
+      }
+
+      const myLevel = calculateLevelAndRank(profile.xp);
+      const newRequest: FriendRequest = {
+        id: myReqId,
+        fromUid: myUid,
+        fromPlayerId: profile.playerId,
+        fromUsername: profile.username.slice(0, 30),
+        fromCountryCode: profile.country.code || 'SA',
+        fromCountryName: (profile.country.name || 'السعودية').slice(0, 50),
+        fromCountryFlag: profile.country.flag || '🌍',
+        fromLevel: Math.max(1, Math.floor(myLevel.level)),
+        fromRankTitle: myLevel.rankTitle.slice(0, 40),
+        fromRankTitleEn: myLevel.rankTitleEn.slice(0, 40),
+        fromVipTier: profile.vipTier || 'none',
+        toUid: target.uid,
+        toPlayerId: target.playerId,
+        toUsername: target.username.slice(0, 30),
+        toCountryCode: target.country.code || 'SA',
+        toCountryName: (target.country.name || 'السعودية').slice(0, 50),
+        toCountryFlag: target.country.flag || '🌍',
+        toLevel: Math.max(1, Math.floor(target.level || 1)),
+        toRankTitle: (target.rankTitle || 'مبتدئ واعد').slice(0, 40),
+        toRankTitleEn: (target.rankTitleEn || 'Rising Challenger').slice(0, 40),
+        toVipTier: target.vipTier || 'none',
+        participants: sortedParticipants,
+        status: 'pending',
+        createdAtMs: nowMs,
+        updatedAtMs: nowMs,
+      };
+
+      await setDoc(myReqRef, newRequest);
+      return { ok: true, status: 'sent', targetUsername: target.username };
     } catch (err) {
-      handleFirestoreError(err, OperationType.LIST, 'leaderboard_public/searchFriend');
-    }
-
-    // 2. Fallback to local & leaderboard competitors
-    return this.addFriendByIdentifier(profile, rawIdentifier, lang);
-  }
-
-  public addFriendByIdentifier(
-    profile: PlayerProfile,
-    rawIdentifier: string,
-    lang: AppLanguage
-  ): { ok: true; profile: PlayerProfile; friend: FriendContact } | { ok: false; error: string } {
-    const clean = rawIdentifier.trim();
-    const lower = clean.toLowerCase();
-
-    if (!clean || clean.length < 3) {
+      handleFirestoreError(err, OperationType.CREATE, 'friend_requests');
       return {
         ok: false,
-        error:
-          lang === 'en'
-            ? 'Please enter a valid 10-digit Player ID or username (at least 3 characters).'
-            : 'يرجى إدخال كود لاعب صحيح (10 أرقام) أو اسم مستخدم (3 أحرف على الأقل).',
+        error: formatFirebaseAuthOrFirestoreError(err, lang),
       };
-    }
-
-    if (
-      clean === profile.playerId ||
-      lower === profile.username.trim().toLowerCase()
-    ) {
-      return {
-        ok: false,
-        error:
-          lang === 'en'
-            ? 'You cannot add yourself as a friend.'
-            : 'لا يمكنك إضافة حسابك الشخصي إلى قائمة الأصدقاء.',
-      };
-    }
-
-    const alreadyExists = profile.friends.some(
-      (f) =>
-        f.playerId.toLowerCase() === lower ||
-        f.username.trim().toLowerCase() === lower
-    );
-    if (alreadyExists) {
-      return {
-        ok: false,
-        error:
-          lang === 'en'
-            ? 'This player is already in your friends list.'
-            : 'هذا اللاعب مضاف بالفعل في قائمة أصدقائك.',
-      };
-    }
-
-    const allSaved = this.loadAllSavedAccounts();
-    const savedMatch = allSaved.find(
-      (a) =>
-        a.playerId !== profile.playerId &&
-        (a.playerId.toLowerCase() === lower || a.username.trim().toLowerCase() === lower)
-    );
-
-    const competitorMatch = [
-      ...this.cloudLeaderboardCache,
-      ...this.loadCompetitors(),
-    ].find(
-      (c) =>
-        c.playerId !== profile.playerId &&
-        (c.playerId.toLowerCase() === lower || c.username.trim().toLowerCase() === lower)
-    );
-
-    let newFriend: FriendContact;
-    if (savedMatch) {
-      const lvl = calculateLevelAndRank(savedMatch.xp);
-      newFriend = {
-        uid: savedMatch.uid,
-        playerId: savedMatch.playerId,
-        username: savedMatch.username,
-        country: savedMatch.country,
-        level: lvl.level,
-        rankTitle: lvl.rankTitle,
-        rankTitleEn: lvl.rankTitleEn,
-        vipTier: savedMatch.vipTier,
-        addedAtIso: new Date().toISOString(),
-        isOnline: true,
-        unreadCount: 1,
-      };
-    } else if (competitorMatch) {
-      newFriend = {
-        uid: competitorMatch.uid,
-        playerId: competitorMatch.playerId,
-        username: competitorMatch.username,
-        country: competitorMatch.country,
-        level: competitorMatch.level,
-        rankTitle: competitorMatch.rankTitle,
-        rankTitleEn: competitorMatch.rankTitleEn || 'Arena Challenger',
-        vipTier: competitorMatch.vipTier,
-        addedAtIso: new Date().toISOString(),
-        isOnline: true,
-        unreadCount: 1,
-      };
-    } else {
-      const isTenDigits = /^\d{10}$/.test(clean);
-      const generatedId = isTenDigits
-        ? clean
-        : generateUnique10DigitId(profile.friends.map((f) => f.playerId));
-      const generatedName = isTenDigits ? `بطل_${clean.slice(0, 4)}` : clean.slice(0, 20);
-      const randomCountry =
-        COUNTRIES_LIST[clean.charCodeAt(0) % Math.min(20, COUNTRIES_LIST.length)];
-
-      newFriend = {
-        playerId: generatedId,
-        username: generatedName,
-        country: randomCountry,
-        level: 5,
-        rankTitle: 'باحث طموح',
-        rankTitleEn: 'Ambitious Seeker',
-        vipTier: 'none',
-        addedAtIso: new Date().toISOString(),
-        isOnline: true,
-        unreadCount: 1,
-      };
-    }
-
-    return this.finalizeAddFriend(profile, newFriend, lang);
-  }
-
-  private finalizeAddFriend(
-    profile: PlayerProfile,
-    newFriend: FriendContact,
-    lang: AppLanguage
-  ): { ok: true; profile: PlayerProfile; friend: FriendContact } {
-    const threadId = buildCanonicalChatId(profile.playerId, newFriend.playerId);
-    const nowIso = new Date().toISOString();
-    const nowMs = Date.now();
-    const welcomeMsg: ChatMessage = {
-      id: `msg_${nowMs}`,
-      threadId,
-      senderUid: auth.currentUser?.uid || profile.uid || 'system',
-      senderId: newFriend.playerId,
-      receiverId: profile.playerId,
-      text:
-        lang === 'en'
-          ? `Hello ${profile.username}! Glad we're friends now in Peak of Challenge ${newFriend.country.flag}. Let's compete!`
-          : `أهلاً بك يا ${profile.username}! يسعدني إضافتك في قائمة الأصدقاء بقمة التحدي ${newFriend.country.flag}. جاهز للتنافس؟`,
-      createdAtIso: nowIso,
-      createdAtMs: nowMs,
-      status: 'delivered',
-    };
-
-    const existingThread = profile.chatThreads[newFriend.playerId] || [];
-    const updatedProfile: PlayerProfile = {
-      ...profile,
-      friends: [newFriend, ...profile.friends],
-      chatThreads: {
-        ...profile.chatThreads,
-        [newFriend.playerId]:
-          existingThread.length > 0 ? existingThread : [welcomeMsg],
-      },
-    };
-
-    // Initialize chat thread document in Cloud Firestore with participants array [senderUid, receiverUid]
-    void this.ensureCloudChatThread(
-      profile.playerId,
-      newFriend.playerId,
-      newFriend.uid
-    );
-
-    return {
-      ok: true,
-      profile: this.saveProfile(updatedProfile),
-      friend: newFriend,
-    };
-  }
-
-  private buildChatParticipantsUids(
-    myUid: string,
-    friendPlayerId: string,
-    friendUid?: string
-  ): [string, string] {
-    const resolvedFriendUid =
-      friendUid && friendUid !== myUid ? friendUid : `uid_${friendPlayerId}`;
-    return [myUid, resolvedFriendUid];
-  }
-
-  private async ensureCloudChatThread(
-    playerIdA: string,
-    playerIdB: string,
-    friendUid?: string
-  ): Promise<void> {
-    try {
-      const uid = await ensureFirebaseAuthSession();
-      if (!uid) return;
-      const chatId = buildCanonicalChatId(playerIdA, playerIdB);
-      const chatRef = doc(db, 'chats', chatId);
-      const participants = this.buildChatParticipantsUids(
-        uid,
-        playerIdB,
-        friendUid
-      );
-      await setDoc(
-        chatRef,
-        {
-          chatId,
-          participants,
-          participantPlayerIds: [playerIdA, playerIdB].sort(),
-          updatedAtMs: Date.now(),
-        },
-        { merge: true }
-      );
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, 'chats/init');
-    }
-  }
-
-  public sendPrivateChatMessage(
-    profile: PlayerProfile,
-    friendId: string,
-    text: string
-  ): { profile: PlayerProfile; sentMessage: ChatMessage } {
-    const threadId = buildCanonicalChatId(profile.playerId, friendId);
-    const nowMs = Date.now();
-    const nowIso = new Date(nowMs).toISOString();
-    const msgId = `msg_${nowMs}_${Math.random().toString(36).slice(2, 6)}`;
-    const cleanText = text.trim().slice(0, 500);
-    const matchedFriend = profile.friends.find((f) => f.playerId === friendId);
-
-    const msg: ChatMessage = {
-      id: msgId,
-      threadId,
-      senderUid: auth.currentUser?.uid || profile.uid || 'local',
-      senderId: profile.playerId,
-      receiverId: friendId,
-      text: cleanText,
-      createdAtIso: nowIso,
-      createdAtMs: nowMs,
-      status: 'read',
-    };
-
-    const prevList = profile.chatThreads[friendId] || [];
-    const nextProfile: PlayerProfile = {
-      ...profile,
-      friends: profile.friends.map((f) =>
-        f.playerId === friendId ? { ...f, unreadCount: 0 } : f
-      ),
-      chatThreads: {
-        ...profile.chatThreads,
-        [friendId]: [...prevList, msg],
-      },
-    };
-
-    // Push message to Firestore chats/{chatId}/messages/{msgId} with participants array
-    void this.pushMessageToFirestore(
-      threadId,
-      msg,
-      [profile.playerId, friendId],
-      matchedFriend?.uid
-    );
-
-    return {
-      profile: this.saveProfile(nextProfile, { skipCloudSync: true }),
-      sentMessage: msg,
-    };
-  }
-
-  private async pushMessageToFirestore(
-    chatId: string,
-    msg: ChatMessage,
-    participantPlayerIds: [string, string],
-    friendUid?: string
-  ): Promise<void> {
-    try {
-      const uid = await ensureFirebaseAuthSession();
-      if (!uid) return;
-
-      const otherPlayerId =
-        participantPlayerIds[0] === msg.senderId
-          ? participantPlayerIds[1]
-          : participantPlayerIds[0];
-      const participants = this.buildChatParticipantsUids(
-        uid,
-        otherPlayerId,
-        friendUid
-      );
-
-      const chatRef = doc(db, 'chats', chatId);
-      await setDoc(
-        chatRef,
-        {
-          chatId,
-          participants,
-          participantPlayerIds: [...participantPlayerIds].sort(),
-          updatedAtMs: Date.now(),
-        },
-        { merge: true }
-      );
-
-      const msgRef = doc(db, 'chats', chatId, 'messages', msg.id);
-      await setDoc(msgRef, {
-        id: msg.id,
-        threadId: chatId,
-        participants,
-        senderUid: uid,
-        senderId: msg.senderId,
-        receiverId: msg.receiverId,
-        text: msg.text.slice(0, 500),
-        createdAtIso: msg.createdAtIso,
-        createdAtMs: msg.createdAtMs || Date.now(),
-        status: msg.status,
-      });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, `chats/${chatId}/messages/${msg.id}`);
     }
   }
 
   /**
-   * Real-time listener (`onSnapshot`) for private chat messages (`chats/{chatId}/messages`),
-   * filtered by `participants` array-contains `request.auth.uid` to satisfy `firestore.rules`.
+   * Accepts an incoming friend request atomically:
+   * 1. Marks `/friend_requests/{request.id}` as `'accepted'`
+   * 2. Creates `/friendships/{sortedUids}` so BOTH players immediately see each other as friends
+   * 3. Ensures `/chats/{sortedUids}` exists for instant private chat
    */
-  public subscribeToPrivateChatMessages(
-    myPlayerId: string,
-    friendPlayerId: string,
-    onUpdateMessages: (messages: ChatMessage[]) => void
-  ): Unsubscribe {
-    const uid = auth.currentUser?.uid;
-    if (!uid) return () => {};
+  public async acceptFriendRequestAsync(
+    profile: PlayerProfile,
+    request: FriendRequest,
+    lang: AppLanguage
+  ): Promise<{ ok: true; friend: FriendContact } | { ok: false; error: string }> {
+    const myUid = auth.currentUser?.uid || (await ensureFirebaseAuthSession());
+    if (!myUid) {
+      return {
+        ok: false,
+        error: lang === 'en' ? 'Not signed in.' : 'يرجى تسجيل الدخول أولاً.',
+      };
+    }
 
-    const chatId = buildCanonicalChatId(myPlayerId, friendPlayerId);
-    const messagesRef = collection(db, 'chats', chatId, 'messages');
+    try {
+      const otherUid = request.fromUid === myUid ? request.toUid : request.fromUid;
+      const sortedParticipants = buildSortedUidPair(myUid, otherUid);
+      const friendshipId = sortedParticipants.join('_');
+      const nowMs = Date.now();
+      const myLevel = calculateLevelAndRank(profile.xp);
+
+      const otherIsFrom = request.fromUid === otherUid;
+      const otherSnapshot = {
+        uid: otherUid,
+        playerId: otherIsFrom ? request.fromPlayerId : request.toPlayerId,
+        username: otherIsFrom ? request.fromUsername : request.toUsername,
+        countryCode: otherIsFrom ? request.fromCountryCode : request.toCountryCode,
+        countryName: otherIsFrom ? request.fromCountryName : request.toCountryName,
+        countryFlag: otherIsFrom ? request.fromCountryFlag : request.toCountryFlag,
+        level: Math.max(1, Math.floor(otherIsFrom ? request.fromLevel : request.toLevel)),
+        rankTitle: otherIsFrom ? request.fromRankTitle : request.toRankTitle,
+        rankTitleEn:
+          (otherIsFrom ? request.fromRankTitleEn : request.toRankTitleEn) || 'Arena Challenger',
+        vipTier: (otherIsFrom ? request.fromVipTier : request.toVipTier) || 'none',
+      };
+
+      const mySnapshot = {
+        uid: myUid,
+        playerId: profile.playerId,
+        username: profile.username.slice(0, 30),
+        countryCode: profile.country.code || 'SA',
+        countryName: (profile.country.name || 'السعودية').slice(0, 50),
+        countryFlag: profile.country.flag || '🌍',
+        level: Math.max(1, Math.floor(myLevel.level)),
+        rankTitle: myLevel.rankTitle.slice(0, 40),
+        rankTitleEn: myLevel.rankTitleEn.slice(0, 40),
+        vipTier: profile.vipTier || 'none',
+      };
+
+      const sortedPlayerIds = [mySnapshot.playerId, otherSnapshot.playerId].sort() as [
+        string,
+        string,
+      ];
+
+      const batch = writeBatch(db);
+      const reqRef = doc(db, 'friend_requests', request.id);
+      batch.update(reqRef, {
+        status: 'accepted',
+        updatedAtMs: nowMs,
+      });
+
+      const friendshipRef = doc(db, 'friendships', friendshipId);
+      batch.set(friendshipRef, {
+        id: friendshipId,
+        chatId: friendshipId,
+        participants: sortedParticipants,
+        participantPlayerIds: sortedPlayerIds,
+        memberProfiles: {
+          [myUid]: mySnapshot,
+          [otherUid]: otherSnapshot,
+        },
+        createdAtMs: nowMs,
+        updatedAtMs: nowMs,
+      });
+
+      await batch.commit();
+
+      // Ensure chat thread document exists cleanly (outside batch to safely check existence)
+      const chatRef = doc(db, 'chats', friendshipId);
+      const chatSnap = await getDoc(chatRef);
+      if (!chatSnap.exists()) {
+        await setDoc(chatRef, {
+          chatId: friendshipId,
+          participants: sortedParticipants,
+          participantPlayerIds: sortedPlayerIds,
+          lastMessageText: '',
+          lastMessageSenderUid: '',
+          lastMessageSenderName: '',
+          lastMessageAtMs: 0,
+          unreadByUid: { [myUid]: 0, [otherUid]: 0 },
+          lastReadAtMs: { [myUid]: nowMs, [otherUid]: nowMs },
+          updatedAtMs: nowMs,
+        });
+      }
+
+      const otherCountry = resolveCountryByCode(otherSnapshot.countryCode, {
+        code: otherSnapshot.countryCode,
+        name: otherSnapshot.countryName,
+        nameEn: otherSnapshot.countryName,
+        flag: otherSnapshot.countryFlag,
+        dialCode: '+966',
+      });
+
+      const newFriend: FriendContact = {
+        uid: otherUid,
+        chatId: friendshipId,
+        playerId: otherSnapshot.playerId,
+        username: otherSnapshot.username,
+        country: otherCountry,
+        level: otherSnapshot.level,
+        rankTitle: otherSnapshot.rankTitle,
+        rankTitleEn: otherSnapshot.rankTitleEn,
+        vipTier: otherSnapshot.vipTier as VipTier,
+        addedAtIso: new Date(nowMs).toISOString(),
+        isOnline: false,
+        unreadCount: 0,
+      };
+
+      return { ok: true, friend: newFriend };
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, `friend_requests/${request.id}/accept`);
+      return {
+        ok: false,
+        error: formatFirebaseAuthOrFirestoreError(err, lang),
+      };
+    }
+  }
+
+  /**
+   * Rejects an incoming friend request (or cancels an outgoing pending request)
+   * by deleting the request document cleanly from Firestore.
+   */
+  public async rejectOrCancelFriendRequestAsync(
+    requestId: string,
+    lang: AppLanguage
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    try {
+      await ensureFirebaseAuthSession();
+      await deleteDoc(doc(db, 'friend_requests', requestId));
+      return { ok: true };
+    } catch (err) {
+      handleFirestoreError(err, OperationType.DELETE, `friend_requests/${requestId}`);
+      return {
+        ok: false,
+        error: formatFirebaseAuthOrFirestoreError(err, lang),
+      };
+    }
+  }
+
+  /**
+   * Real-time listener (`onSnapshot`) for ALL friend requests involving `myUid`
+   * (both incoming pending requests and outgoing pending requests).
+   */
+  public subscribeToFriendRequests(
+    myUid: string,
+    onUpdate: (data: { incoming: FriendRequest[]; outgoing: FriendRequest[] }) => void
+  ): Unsubscribe {
+    if (!myUid) return () => {};
     const q = query(
-      messagesRef,
-      where('participants', 'array-contains', uid),
-      limit(100)
+      collection(db, 'friend_requests'),
+      where('participants', 'array-contains', myUid)
     );
 
     return onSnapshot(
       q,
       (snapshot) => {
-        if (snapshot.empty) return;
-        const cloudMsgs: ChatMessage[] = snapshot.docs.map((d) => {
-          const data = d.data();
-          return {
-            id: data.id || d.id,
-            threadId: data.threadId || chatId,
-            senderUid: data.senderUid,
-            senderId: data.senderId,
-            receiverId: data.receiverId,
-            text: data.text,
-            createdAtIso: data.createdAtIso || new Date().toISOString(),
-            createdAtMs: data.createdAtMs || Date.now(),
-            status: data.status || 'delivered',
+        const incoming: FriendRequest[] = [];
+        const outgoing: FriendRequest[] = [];
+
+        snapshot.forEach((docSnap) => {
+          const d = docSnap.data() as FriendRequest;
+          if (d.status !== 'pending') return;
+          const normalized: FriendRequest = {
+            ...d,
+            id: d.id || docSnap.id,
           };
+          if (normalized.toUid === myUid) {
+            incoming.push(normalized);
+          } else if (normalized.fromUid === myUid) {
+            outgoing.push(normalized);
+          }
         });
-        cloudMsgs.sort((a, b) => (a.createdAtMs || 0) - (b.createdAtMs || 0));
-        onUpdateMessages(cloudMsgs);
+
+        incoming.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
+        outgoing.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
+        onUpdate({ incoming, outgoing });
       },
       (error) => {
-        handleFirestoreError(error, OperationType.LIST, `chats/${chatId}/messages`);
+        handleFirestoreError(error, OperationType.LIST, 'friend_requests');
       }
     );
   }
 
-  public receiveFriendAutoReply(
+  /**
+   * Publishes this player's genuine real-time online/offline heartbeat to `/presence/{uid}`.
+   * Uses Firestore `serverTimestamp()` so friends can evaluate online freshness accurately
+   * regardless of clock skew between two devices.
+   */
+  public async updateMyPresenceAsync(uid: string, online: boolean): Promise<void> {
+    if (!uid) return;
+    try {
+      const presenceRef = doc(db, 'presence', uid);
+      const nowMs = Math.floor(Date.now());
+      await setDoc(presenceRef, {
+        uid,
+        online,
+        lastSeenMs: nowMs,
+        heartbeatAt: serverTimestamp(),
+        updatedAtMs: nowMs,
+      });
+    } catch {
+      // Non-fatal: ignore transient offline or pre-published-rules errors so gameplay is never interrupted
+    }
+  }
+
+  /**
+   * Listens to this player's own `/presence/{uid}` doc to estimate Firestore server clock offset
+   * (`serverTimeMs - localClockMs`) so multi-device online/offline evaluation is immune to clock skew.
+   */
+  public subscribeToMyPresenceClockOffset(
+    uid: string,
+    onOffset: (offsetMs: number) => void
+  ): Unsubscribe {
+    if (!uid) return () => {};
+    const presenceRef = doc(db, 'presence', uid);
+    return onSnapshot(
+      presenceRef,
+      (snap) => {
+        if (!snap.exists()) return;
+        const data = snap.data() as Record<string, unknown>;
+        const hb = data.heartbeatAt as { toMillis?: () => number } | undefined;
+        if (hb && typeof hb.toMillis === 'function') {
+          const serverMs = hb.toMillis();
+          if (serverMs > 0) {
+            onOffset(serverMs - Date.now());
+          }
+        }
+      },
+      () => {
+        // Silently ignore if presence rules aren't published yet
+      }
+    );
+  }
+
+  /**
+   * Opens per-friend `onSnapshot` document listeners on `/presence/{friendUid}` (using `allow get`,
+   * zero `list` queries) so both devices see exact, real-time online/offline status for every friend.
+   */
+  public subscribeToFriendsPresence(
+    friendUids: string[],
+    onUpdate: (presenceByUid: Record<string, UserPresence>) => void
+  ): Unsubscribe {
+    const uniqueUids = Array.from(new Set(friendUids.filter(Boolean)));
+    if (uniqueUids.length === 0) {
+      onUpdate({});
+      return () => {};
+    }
+
+    const state: Record<string, UserPresence> = {};
+    const unsubs: Unsubscribe[] = [];
+
+    const emit = () => {
+      onUpdate({ ...state });
+    };
+
+    uniqueUids.forEach((friendUid) => {
+      const ref = doc(db, 'presence', friendUid);
+      const unsub = onSnapshot(
+        ref,
+        (snap) => {
+          if (!snap.exists()) {
+            state[friendUid] = {
+              uid: friendUid,
+              online: false,
+              lastSeenMs: 0,
+              updatedAtMs: 0,
+            };
+          } else {
+            const data = snap.data({ serverTimestamps: 'estimate' }) as Record<string, unknown>;
+            const hb = data.heartbeatAt as { toMillis?: () => number } | undefined;
+            const heartbeatServerMs =
+              hb && typeof hb.toMillis === 'function' ? hb.toMillis() : undefined;
+            state[friendUid] = {
+              uid: friendUid,
+              online: Boolean(data.online),
+              lastSeenMs: Number(data.lastSeenMs || 0),
+              heartbeatServerMs,
+              updatedAtMs: Number(data.updatedAtMs || 0),
+            };
+          }
+          emit();
+        },
+        () => {
+          // Graceful fallback to offline if doc cannot be read
+          state[friendUid] = {
+            uid: friendUid,
+            online: false,
+            lastSeenMs: 0,
+            updatedAtMs: 0,
+          };
+          emit();
+        }
+      );
+      unsubs.push(unsub);
+    });
+
+    return () => {
+      unsubs.forEach((u) => u());
+    };
+  }
+
+  /**
+   * Real-time listener (`onSnapshot`) for confirmed mutual friendships (`/friendships`)
+   * so both users immediately see each other identically in their Friends List with canonical chatId.
+   */
+  public subscribeToFriendships(
+    myUid: string,
+    onUpdate: (friends: FriendContact[]) => void
+  ): Unsubscribe {
+    if (!myUid) return () => {};
+    const q = query(
+      collection(db, 'friendships'),
+      where('participants', 'array-contains', myUid)
+    );
+
+    const publicProfileCache = new Map<string, Record<string, unknown>>();
+    let isDisposed = false;
+    let latestRawFriends: FriendContact[] = [];
+
+    const mergeCachedProfiles = (list: FriendContact[]): FriendContact[] =>
+      list.map((friend) => {
+        if (!friend.uid) return friend;
+        const cached = publicProfileCache.get(friend.uid);
+        if (!cached) return friend;
+        const resolvedCountry = resolveCountryByCode(
+          typeof cached.countryCode === 'string' ? cached.countryCode : friend.country.code,
+          {
+            code: String(cached.countryCode || friend.country.code || 'SA'),
+            name: String(cached.countryName || friend.country.name || 'السعودية'),
+            nameEn: String(cached.countryName || friend.country.nameEn || 'Saudi Arabia'),
+            flag: String(cached.countryFlag || friend.country.flag || '🌍'),
+            dialCode: friend.country.dialCode || '+966',
+          }
+        );
+        return {
+          ...friend,
+          playerId: friend.playerId || String(cached.playerId || ''),
+          username:
+            friend.username && friend.username !== 'صديق'
+              ? friend.username
+              : String(cached.username || friend.username || 'صديق'),
+          country: resolvedCountry,
+          level: Number(cached.level || friend.level || 1),
+          rankTitle: String(cached.rankTitle || friend.rankTitle || 'مبتدئ واعد'),
+          rankTitleEn: String(cached.rankTitleEn || friend.rankTitleEn || 'Arena Challenger'),
+          vipTier: ((cached.vipTier as VipTier) || friend.vipTier || 'none') as VipTier,
+        };
+      });
+
+    const unsub = onSnapshot(
+      q,
+      (snapshot) => {
+        const friendsByOtherUid = new Map<string, FriendContact>();
+        const uidsNeedingBackfill: string[] = [];
+
+        snapshot.forEach((docSnap) => {
+          const data = docSnap.data();
+          const participants = Array.isArray(data.participants)
+            ? (data.participants as string[])
+            : [];
+          const otherUid = participants.find((p) => p !== myUid);
+          if (!otherUid) return;
+
+          // Always derive canonical sorted chat room ID so both devices open the exact same room
+          const canonicalChatId = buildSortedUidPair(myUid, otherUid).join('_');
+
+          const memberProfiles = (data.memberProfiles || {}) as Record<
+            string,
+            Record<string, unknown>
+          >;
+          const other = memberProfiles[otherUid] || {};
+          const otherUsername = typeof other.username === 'string' ? other.username.trim() : '';
+          const otherPlayerId = typeof other.playerId === 'string' ? other.playerId.trim() : '';
+
+          if ((!otherUsername || !otherPlayerId) && !publicProfileCache.has(otherUid)) {
+            uidsNeedingBackfill.push(otherUid);
+          }
+
+          const resolvedCountry = resolveCountryByCode(
+            typeof other.countryCode === 'string' ? other.countryCode : undefined,
+            {
+              code: String(other.countryCode || 'SA'),
+              name: String(other.countryName || 'السعودية'),
+              nameEn: String(other.countryName || 'Saudi Arabia'),
+              flag: String(other.countryFlag || '🌍'),
+              dialCode: '+966',
+            }
+          );
+
+          const contact: FriendContact = {
+            uid: otherUid,
+            chatId: canonicalChatId,
+            playerId: otherPlayerId,
+            username: otherUsername || 'صديق',
+            country: resolvedCountry,
+            level: Number(other.level || 1),
+            rankTitle: String(other.rankTitle || 'مبتدئ واعد'),
+            rankTitleEn: String(other.rankTitleEn || 'Arena Challenger'),
+            vipTier: (other.vipTier as VipTier) || 'none',
+            addedAtIso: new Date(Number(data.createdAtMs || Date.now())).toISOString(),
+            isOnline: false,
+            unreadCount: 0,
+          };
+
+          // Deduplicate by otherUid (keeping the most recently created/updated entry)
+          const existing = friendsByOtherUid.get(otherUid);
+          if (
+            !existing ||
+            new Date(contact.addedAtIso).getTime() >= new Date(existing.addedAtIso).getTime()
+          ) {
+            friendsByOtherUid.set(otherUid, contact);
+          }
+        });
+
+        const sorted = Array.from(friendsByOtherUid.values()).sort(
+          (a, b) => new Date(b.addedAtIso).getTime() - new Date(a.addedAtIso).getTime()
+        );
+        latestRawFriends = sorted;
+        onUpdate(mergeCachedProfiles(sorted));
+
+        // Backfill any incomplete friend profile snapshot from `leaderboard_public/{otherUid}`
+        if (uidsNeedingBackfill.length > 0) {
+          void Promise.all(
+            uidsNeedingBackfill.map(async (uidToFetch) => {
+              try {
+                const snap = await getDoc(doc(db, 'leaderboard_public', uidToFetch));
+                if (snap.exists()) {
+                  publicProfileCache.set(uidToFetch, snap.data() as Record<string, unknown>);
+                }
+              } catch {
+                // Ignore individual backfill failures
+              }
+            })
+          ).then(() => {
+            if (!isDisposed) {
+              onUpdate(mergeCachedProfiles(latestRawFriends));
+            }
+          });
+        }
+      },
+      (error) => {
+        handleFirestoreError(error, OperationType.LIST, 'friendships');
+      }
+    );
+
+    return () => {
+      isDisposed = true;
+      unsub();
+    };
+  }
+
+  /**
+   * Real-time listener (`onSnapshot`) on `/chats` for all conversations involving `myUid`.
+   * Powers live unread counters, red notification dots next to friends, and instant top message alerts.
+   */
+  public subscribeToUserChatsMetadata(
+    myUid: string,
+    onUpdate: (chatsById: Record<string, ChatThreadMeta>) => void
+  ): Unsubscribe {
+    if (!myUid) return () => {};
+    const q = query(
+      collection(db, 'chats'),
+      where('participants', 'array-contains', myUid)
+    );
+
+    return onSnapshot(
+      q,
+      (snapshot) => {
+        const chatsById: Record<string, ChatThreadMeta> = {};
+        snapshot.forEach((docSnap) => {
+          const data = docSnap.data();
+          const participants = Array.isArray(data.participants)
+            ? ([String(data.participants[0] || ''), String(data.participants[1] || '')] as [
+                string,
+                string,
+              ])
+            : (['', ''] as [string, string]);
+          const canonicalChatId =
+            participants[0] && participants[1]
+              ? buildSortedUidPair(participants[0], participants[1]).join('_')
+              : String(data.chatId || docSnap.id);
+
+          chatsById[canonicalChatId] = {
+            chatId: canonicalChatId,
+            participants,
+            participantPlayerIds: Array.isArray(data.participantPlayerIds)
+              ? ([
+                  String(data.participantPlayerIds[0] || ''),
+                  String(data.participantPlayerIds[1] || ''),
+                ] as [string, string])
+              : undefined,
+            lastMessageText: String(data.lastMessageText || ''),
+            lastMessageSenderUid: String(data.lastMessageSenderUid || ''),
+            lastMessageSenderName:
+              typeof data.lastMessageSenderName === 'string'
+                ? data.lastMessageSenderName
+                : undefined,
+            lastMessageAtMs: Number(data.lastMessageAtMs || 0),
+            unreadByUid:
+              data.unreadByUid && typeof data.unreadByUid === 'object'
+                ? (data.unreadByUid as Record<string, number>)
+                : {},
+            lastReadAtMs:
+              data.lastReadAtMs && typeof data.lastReadAtMs === 'object'
+                ? (data.lastReadAtMs as Record<string, number>)
+                : {},
+            updatedAtMs: Number(data.updatedAtMs || 0),
+          };
+        });
+        onUpdate(chatsById);
+      },
+      (error) => {
+        handleFirestoreError(error, OperationType.LIST, 'chats');
+      }
+    );
+  }
+
+  /**
+   * Resolves the canonical Firestore chatId (`[uidA, uidB].sort().join('_')`) and sorted participants pair.
+   * Always computed deterministically from the two UIDs so both devices open the exact same room.
+   */
+  public getCloudChatKey(myUid: string, friend: FriendContact): {
+    chatId: string;
+    participants: [string, string];
+    friendUid: string;
+  } | null {
+    if (!myUid || !friend.uid || friend.uid === myUid) return null;
+    const participants = buildSortedUidPair(myUid, friend.uid);
+    const chatId = participants.join('_');
+    return { chatId, participants, friendUid: friend.uid };
+  }
+
+  /**
+   * Sends a real-time private chat message to Cloud Firestore (`/chats/{canonicalChatId}/messages/{msgId}`)
+   * with an authoritative `createdAtServer: serverTimestamp()`, and atomically updates thread metadata.
+   */
+  public async sendPrivateChatMessageAsync(
     profile: PlayerProfile,
     friend: FriendContact,
-    userText: string,
+    text: string,
     lang: AppLanguage
-  ): PlayerProfile {
-    const threadId = buildCanonicalChatId(profile.playerId, friend.playerId);
-    const replyText = buildFriendSmartReply(friend, userText, lang);
-    const nowMs = Date.now();
-    const replyMsg: ChatMessage = {
-      id: `msg_${nowMs}_reply`,
-      threadId,
-      senderUid: auth.currentUser?.uid || profile.uid || 'friend',
-      senderId: friend.playerId,
-      receiverId: profile.playerId,
-      text: replyText,
-      createdAtIso: new Date(nowMs).toISOString(),
+  ): Promise<{ ok: true; message: ChatMessage } | { ok: false; error: string }> {
+    const cleanText = text.trim().slice(0, 500);
+    if (!cleanText) {
+      return {
+        ok: false,
+        error: lang === 'en' ? 'Message cannot be empty.' : 'لا يمكن إرسال رسالة فارغة.',
+      };
+    }
+
+    const myUid = auth.currentUser?.uid || (await ensureFirebaseAuthSession());
+    if (!myUid) {
+      return {
+        ok: false,
+        error:
+          lang === 'en'
+            ? 'Please sign in first to send messages.'
+            : 'يرجى تسجيل الدخول أولاً لإرسال الرسائل.',
+      };
+    }
+
+    let resolvedFriendUid = friend.uid;
+    if (!resolvedFriendUid) {
+      const lookup = await this.findCloudPlayerByIdentifier(friend.playerId || friend.username);
+      if (lookup?.uid) {
+        resolvedFriendUid = lookup.uid;
+      }
+    }
+
+    if (!resolvedFriendUid || resolvedFriendUid === myUid) {
+      return {
+        ok: false,
+        error:
+          lang === 'en'
+            ? 'Could not resolve this friend’s cloud account.'
+            : 'تعذر العثور على الحساب السحابي لهذا الصديق.',
+      };
+    }
+
+    // Always use canonical sorted room ID so both devices are guaranteed to share the exact same room
+    const sortedParticipants = buildSortedUidPair(myUid, resolvedFriendUid);
+    const chatId = sortedParticipants.join('_');
+    const nowMs = Math.floor(Date.now());
+    const nowIso = new Date(nowMs).toISOString();
+    const msgId = `msg_${nowMs}_${Math.random().toString(36).slice(2, 7)}`;
+
+    const localMessage: ChatMessage = {
+      id: msgId,
+      threadId: chatId,
+      senderUid: myUid,
+      senderId: profile.playerId,
+      receiverUid: resolvedFriendUid,
+      receiverId: friend.playerId || '0000000000',
+      text: cleanText,
+      createdAtIso: nowIso,
       createdAtMs: nowMs,
-      status: 'read',
+      status: 'delivered',
     };
 
-    const prevList = profile.chatThreads[friend.playerId] || [];
-    // If real friend already replied via Firestore, avoid duplicate auto-reply
-    const recentCloudReply = prevList.some(
-      (m) => m.senderId === friend.playerId && nowMs - (m.createdAtMs || 0) < 2500
-    );
-    if (recentCloudReply) return profile;
+    const firestoreMessagePayload = {
+      ...localMessage,
+      participants: sortedParticipants,
+      createdAtServer: serverTimestamp(),
+    };
 
-    const nextProfile: PlayerProfile = {
-      ...profile,
-      chatThreads: {
-        ...profile.chatThreads,
-        [friend.playerId]: [...prevList, replyMsg],
+    try {
+      const chatRef = doc(db, 'chats', chatId);
+      const chatSnap = await getDoc(chatRef);
+      const sortedPlayerIds = [
+        profile.playerId,
+        friend.playerId || profile.playerId,
+      ].sort() as [string, string];
+
+      if (chatSnap.exists()) {
+        await updateDoc(chatRef, {
+          participantPlayerIds: sortedPlayerIds,
+          lastMessageText: cleanText.slice(0, 140),
+          lastMessageSenderUid: myUid,
+          lastMessageSenderName: profile.username.slice(0, 40),
+          lastMessageAtMs: nowMs,
+          [`unreadByUid.${myUid}`]: 0,
+          [`unreadByUid.${resolvedFriendUid}`]: increment(1),
+          [`lastReadAtMs.${myUid}`]: nowMs,
+          updatedAtMs: nowMs,
+        });
+      } else {
+        await setDoc(chatRef, {
+          chatId,
+          participants: sortedParticipants,
+          participantPlayerIds: sortedPlayerIds,
+          lastMessageText: cleanText.slice(0, 140),
+          lastMessageSenderUid: myUid,
+          lastMessageSenderName: profile.username.slice(0, 40),
+          lastMessageAtMs: nowMs,
+          unreadByUid: { [myUid]: 0, [resolvedFriendUid]: 1 },
+          lastReadAtMs: { [myUid]: nowMs, [resolvedFriendUid]: 0 },
+          updatedAtMs: nowMs,
+        });
+      }
+
+      const msgRef = doc(db, 'chats', chatId, 'messages', msgId);
+      await setDoc(msgRef, firestoreMessagePayload);
+
+      return { ok: true, message: localMessage };
+    } catch (err) {
+      handleFirestoreError(err, OperationType.CREATE, `chats/${chatId}/messages/${msgId}`);
+      return {
+        ok: false,
+        error: formatFirebaseAuthOrFirestoreError(err, lang),
+      };
+    }
+  }
+
+  /**
+   * Marks a cloud private chat as read for `myUid` (clears the red unread badge immediately).
+   */
+  public async markCloudChatAsReadAsync(myUid: string, chatId: string): Promise<void> {
+    if (!myUid || !chatId) return;
+    try {
+      const chatRef = doc(db, 'chats', chatId);
+      const chatSnap = await getDoc(chatRef);
+      if (!chatSnap.exists()) return;
+      const data = chatSnap.data();
+      const currentUnread = Number(data?.unreadByUid?.[myUid] || 0);
+      if (currentUnread <= 0) return;
+
+      const nowMs = Math.floor(Date.now());
+      await updateDoc(chatRef, {
+        [`unreadByUid.${myUid}`]: 0,
+        [`lastReadAtMs.${myUid}`]: nowMs,
+        updatedAtMs: nowMs,
+      });
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `chats/${chatId}/read`);
+    }
+  }
+
+  /**
+   * Real-time listener (`onSnapshot`) for private chat messages (`chats/{canonicalChatId}/messages`).
+   * Uses Firestore server timestamps (`createdAtServer`) with `serverTimestamps: 'estimate'` so messages
+   * always appear in exact identical chronological order on both devices regardless of local clock skew.
+   */
+  public subscribeToPrivateChatMessages(
+    myUid: string,
+    friendUid: string,
+    _chatIdOverride: string | undefined,
+    onUpdateMessages: (messages: ChatMessage[]) => void,
+    onError?: (errorMessage: string) => void,
+    lang: AppLanguage = 'ar'
+  ): Unsubscribe {
+    if (!myUid || !friendUid || myUid === friendUid) {
+      onUpdateMessages([]);
+      return () => {};
+    }
+
+    // Always use canonical sorted room ID so sender and receiver open the exact same room
+    const sortedParticipants = buildSortedUidPair(myUid, friendUid);
+    const chatId = sortedParticipants.join('_');
+    const messagesRef = collection(db, 'chats', chatId, 'messages');
+    const q = query(
+      messagesRef,
+      where('participants', 'array-contains', myUid),
+      limit(300)
+    );
+
+    return onSnapshot(
+      q,
+      (snapshot) => {
+        const cloudMsgs: ChatMessage[] = snapshot.docs.map((d) => {
+          const data = d.data({ serverTimestamps: 'estimate' }) as Record<string, unknown>;
+          const rawServerTs = data.createdAtServer as { toMillis?: () => number } | undefined;
+          const serverMs =
+            rawServerTs && typeof rawServerTs.toMillis === 'function'
+              ? rawServerTs.toMillis()
+              : 0;
+          const clientMs = Number(data.createdAtMs || 0);
+          const effectiveMs = serverMs > 0 ? serverMs : clientMs;
+
+          return {
+            id: String(data.id || d.id),
+            threadId: String(data.threadId || chatId),
+            senderUid: typeof data.senderUid === 'string' ? data.senderUid : undefined,
+            senderId: String(data.senderId || ''),
+            receiverUid: typeof data.receiverUid === 'string' ? data.receiverUid : undefined,
+            receiverId: String(data.receiverId || ''),
+            text: String(data.text || ''),
+            createdAtIso:
+              effectiveMs > 0
+                ? new Date(effectiveMs).toISOString()
+                : String(data.createdAtIso || new Date().toISOString()),
+            createdAtMs: effectiveMs,
+            createdAtServerMs: serverMs > 0 ? serverMs : undefined,
+            status: (data.status as ChatMessage['status']) || 'delivered',
+          };
+        });
+
+        cloudMsgs.sort((a, b) => {
+          const aTime = a.createdAtServerMs || a.createdAtMs || 0;
+          const bTime = b.createdAtServerMs || b.createdAtMs || 0;
+          if (aTime !== bTime) return aTime - bTime;
+          return a.id.localeCompare(b.id);
+        });
+        onUpdateMessages(cloudMsgs);
       },
-    };
-
-    void this.pushMessageToFirestore(
-      threadId,
-      replyMsg,
-      [profile.playerId, friend.playerId],
-      friend.uid
+      (error) => {
+        handleFirestoreError(error, OperationType.LIST, `chats/${chatId}/messages`);
+        onError?.(formatFirebaseAuthOrFirestoreError(error, lang));
+      }
     );
-
-    return this.saveProfile(nextProfile, { skipCloudSync: true });
   }
 
   public markThreadAsRead(profile: PlayerProfile, friendId: string): PlayerProfile {

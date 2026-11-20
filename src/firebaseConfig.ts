@@ -407,7 +407,215 @@ service cloud.firestore {
     }
 
     function isValidId(id) {
-      return id is string && id.size() >= 1 && id.size() <= 128;
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_.\\\\-]+$');
+    }
+
+    function isValidParticipantsPair(listData) {
+      return listData is list
+        && listData.size() == 2
+        && listData[0] is string
+        && listData[1] is string
+        && listData[0].size() >= 1
+        && listData[0].size() <= 128
+        && listData[1].size() >= 1
+        && listData[1].size() <= 128
+        && listData[0] != listData[1];
+    }
+
+    function isValidFriendRequest(data) {
+      return data.keys().hasAll([
+          'id',
+          'fromUid',
+          'fromPlayerId',
+          'fromUsername',
+          'fromCountryCode',
+          'fromCountryName',
+          'fromCountryFlag',
+          'fromLevel',
+          'fromRankTitle',
+          'fromVipTier',
+          'toUid',
+          'toPlayerId',
+          'toUsername',
+          'toCountryCode',
+          'toCountryName',
+          'toCountryFlag',
+          'toLevel',
+          'toRankTitle',
+          'toVipTier',
+          'participants',
+          'status',
+          'createdAtMs',
+          'updatedAtMs'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'fromUid',
+          'fromPlayerId',
+          'fromUsername',
+          'fromCountryCode',
+          'fromCountryName',
+          'fromCountryFlag',
+          'fromLevel',
+          'fromRankTitle',
+          'fromRankTitleEn',
+          'fromVipTier',
+          'toUid',
+          'toPlayerId',
+          'toUsername',
+          'toCountryCode',
+          'toCountryName',
+          'toCountryFlag',
+          'toLevel',
+          'toRankTitle',
+          'toRankTitleEn',
+          'toVipTier',
+          'participants',
+          'status',
+          'createdAtMs',
+          'updatedAtMs'
+        ])
+        && isValidId(data.id)
+        && isValidId(data.fromUid)
+        && isValidId(data.toUid)
+        && data.fromUid != data.toUid
+        && isValidParticipantsPair(data.participants)
+        && data.fromUid in data.participants
+        && data.toUid in data.participants
+        && data.fromPlayerId is string && data.fromPlayerId.size() == 10
+        && data.toPlayerId is string && data.toPlayerId.size() == 10
+        && data.fromUsername is string && data.fromUsername.size() >= 2 && data.fromUsername.size() <= 30
+        && data.toUsername is string && data.toUsername.size() >= 2 && data.toUsername.size() <= 30
+        && data.fromCountryCode is string && data.fromCountryCode.size() >= 2 && data.fromCountryCode.size() <= 4
+        && data.toCountryCode is string && data.toCountryCode.size() >= 2 && data.toCountryCode.size() <= 4
+        && data.fromCountryName is string && data.fromCountryName.size() >= 1 && data.fromCountryName.size() <= 50
+        && data.toCountryName is string && data.toCountryName.size() >= 1 && data.toCountryName.size() <= 50
+        && data.fromCountryFlag is string && data.fromCountryFlag.size() >= 1 && data.fromCountryFlag.size() <= 16
+        && data.toCountryFlag is string && data.toCountryFlag.size() >= 1 && data.toCountryFlag.size() <= 16
+        && data.fromLevel is int && data.fromLevel >= 1
+        && data.toLevel is int && data.toLevel >= 1
+        && data.fromRankTitle is string && data.fromRankTitle.size() >= 1 && data.fromRankTitle.size() <= 40
+        && data.toRankTitle is string && data.toRankTitle.size() >= 1 && data.toRankTitle.size() <= 40
+        && (!('fromRankTitleEn' in data) || (data.fromRankTitleEn is string && data.fromRankTitleEn.size() <= 40))
+        && (!('toRankTitleEn' in data) || (data.toRankTitleEn is string && data.toRankTitleEn.size() <= 40))
+        && data.fromVipTier in ['none', 'bronze', 'silver', 'gold', 'legend']
+        && data.toVipTier in ['none', 'bronze', 'silver', 'gold', 'legend']
+        && data.status in ['pending', 'accepted', 'rejected']
+        && data.createdAtMs is int && data.createdAtMs >= 0
+        && data.updatedAtMs is int && data.updatedAtMs >= 0;
+    }
+
+    function isValidFriendship(data) {
+      return data.keys().hasAll([
+          'id',
+          'chatId',
+          'participants',
+          'participantPlayerIds',
+          'memberProfiles',
+          'createdAtMs',
+          'updatedAtMs'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'chatId',
+          'participants',
+          'participantPlayerIds',
+          'memberProfiles',
+          'createdAtMs',
+          'updatedAtMs'
+        ])
+        && isValidId(data.id)
+        && isValidId(data.chatId)
+        && isValidParticipantsPair(data.participants)
+        && data.participantPlayerIds is list
+        && data.participantPlayerIds.size() == 2
+        && data.participantPlayerIds[0] is string && data.participantPlayerIds[0].size() == 10
+        && data.participantPlayerIds[1] is string && data.participantPlayerIds[1].size() == 10
+        && data.memberProfiles is map
+        && data.createdAtMs is int && data.createdAtMs >= 0
+        && data.updatedAtMs is int && data.updatedAtMs >= 0;
+    }
+
+    function isValidChatThread(data) {
+      return data.keys().hasAll([
+          'chatId',
+          'participants',
+          'updatedAtMs'
+        ])
+        && data.keys().hasOnly([
+          'chatId',
+          'participants',
+          'participantPlayerIds',
+          'lastMessageText',
+          'lastMessageSenderUid',
+          'lastMessageSenderName',
+          'lastMessageAtMs',
+          'unreadByUid',
+          'lastReadAtMs',
+          'updatedAtMs'
+        ])
+        && isValidId(data.chatId)
+        && isValidParticipantsPair(data.participants)
+        && data.updatedAtMs is int && data.updatedAtMs >= 0
+        && (!('participantPlayerIds' in data) || (data.participantPlayerIds is list && data.participantPlayerIds.size() == 2))
+        && (!('lastMessageText' in data) || (data.lastMessageText is string && data.lastMessageText.size() <= 500))
+        && (!('lastMessageSenderUid' in data) || (data.lastMessageSenderUid is string && data.lastMessageSenderUid.size() <= 128))
+        && (!('lastMessageSenderName' in data) || (data.lastMessageSenderName is string && data.lastMessageSenderName.size() <= 40))
+        && (!('lastMessageAtMs' in data) || (data.lastMessageAtMs is int && data.lastMessageAtMs >= 0))
+        && (!('unreadByUid' in data) || data.unreadByUid is map)
+        && (!('lastReadAtMs' in data) || data.lastReadAtMs is map);
+    }
+
+    function isValidChatMessage(data) {
+      return data.keys().hasAll([
+          'id',
+          'threadId',
+          'participants',
+          'senderUid',
+          'senderId',
+          'receiverId',
+          'text',
+          'createdAtIso',
+          'createdAtMs',
+          'status'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'threadId',
+          'participants',
+          'senderUid',
+          'senderId',
+          'receiverUid',
+          'receiverId',
+          'text',
+          'createdAtIso',
+          'createdAtMs',
+          'createdAtServer',
+          'status'
+        ])
+        && isValidId(data.id)
+        && isValidId(data.threadId)
+        && isValidParticipantsPair(data.participants)
+        && data.senderUid == request.auth.uid
+        && request.auth.uid in data.participants
+        && data.senderId is string && data.senderId.size() >= 1 && data.senderId.size() <= 32
+        && data.receiverId is string && data.receiverId.size() >= 1 && data.receiverId.size() <= 32
+        && (!('receiverUid' in data) || (data.receiverUid is string && data.receiverUid.size() <= 128))
+        && data.text is string && data.text.size() >= 1 && data.text.size() <= 500
+        && data.createdAtIso is string && data.createdAtIso.size() >= 1 && data.createdAtIso.size() <= 64
+        && data.createdAtMs is int && data.createdAtMs >= 0
+        && (!('createdAtServer' in data) || data.createdAtServer is timestamp)
+        && data.status in ['sent', 'delivered', 'read'];
+    }
+
+    function isValidPresence(data, uid) {
+      return data.keys().hasAll(['uid', 'online', 'lastSeenMs', 'updatedAtMs'])
+        && data.keys().hasOnly(['uid', 'online', 'lastSeenMs', 'heartbeatAt', 'updatedAtMs'])
+        && data.uid == uid
+        && data.online is bool
+        && data.lastSeenMs is int && data.lastSeenMs >= 0
+        && (!('heartbeatAt' in data) || data.heartbeatAt is timestamp)
+        && data.updatedAtMs is int && data.updatedAtMs >= 0;
     }
 
     // 50 يوماً بالمللي ثانية = 50 * 24 * 60 * 60 * 1000 = 4,320,000,000 مللي ثانية
@@ -581,10 +789,8 @@ service cloud.firestore {
     // 1. مجموعة اللاعبين الخاصة (محمية لصاحب الحساب فقط): /players/{uid}
     // =========================================================================
     match /players/{uid} {
-      // قراءة المستند الكامل (الذي يحتوي على email و phone و coins و fairPlayScore) مقتصرة على صاحب الحساب فقط
       allow read: if isOwner(uid);
 
-      // إنشاء حساب جديد لصاحب الحساب فقط وبقيم بداية نظامية (بدون VIP)
       allow create: if isOwner(uid)
         && isValidId(uid)
         && isValidPlayerShape(incoming(), uid)
@@ -594,7 +800,6 @@ service cloud.firestore {
         && incoming().coins <= 100
         && incoming().fairPlayScore == 100;
 
-      // تحديث بيانات اللاعب مع قفل تعديل vipTier و adsRemoved من العميل وفرض Rate Limiting (25 ثانية)
       allow update: if isOwner(uid)
         && isValidId(uid)
         && isValidPlayerShape(incoming(), uid)
@@ -608,7 +813,6 @@ service cloud.firestore {
         && isValidIdentityChangeCooldown()
         && isValidFairPlayScoreUpdate();
 
-      // يمنع حذف سجل اللاعب نهائياً
       allow delete: if false;
     }
 
@@ -616,7 +820,6 @@ service cloud.firestore {
     // 2. مجموعة قائمة المتصدرين العامة (للقراءة العامة بدون بيانات حساسة): /leaderboard_public/{uid}
     // =========================================================================
     match /leaderboard_public/{uid} {
-      // متاحة للقراءة لعرض قائمة المتصدرين الشهرية والبحث عن الأصدقاء بأمان
       allow read: if isSignedIn();
 
       allow create: if isOwner(uid)
@@ -641,7 +844,6 @@ service cloud.firestore {
     // 3. مجموعة حجز الأسماء ومنع التكرار عالمياً: /usernames/{nameNormalized}
     // =========================================================================
     match /usernames/{nameNormalized} {
-      // القراءة متاحة للتحقق من توفر الاسم قبل وأثناء التسجيل
       allow read: if true;
 
       allow create: if isSignedIn()
@@ -662,57 +864,150 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // 4. مجموعة الدردشة الخاصة المحمية بالمشاركين فقط: /chats/{chatId} و /messages/{messageId}
+    // 4. مجموعة طلبات الصداقة الفورية: /friend_requests/{requestId}
+    // =========================================================================
+    match /friend_requests/{requestId} {
+      allow get: if isSignedIn()
+        && isValidId(requestId)
+        && (resource == null || request.auth.uid in existing().participants);
+
+      allow list: if isSignedIn()
+        && request.auth.uid in existing().participants;
+
+      allow create: if isSignedIn()
+        && isValidId(requestId)
+        && isValidFriendRequest(incoming())
+        && incoming().fromUid == request.auth.uid
+        && incoming().status == 'pending';
+
+      allow update: if isSignedIn()
+        && isValidId(requestId)
+        && isValidFriendRequest(incoming())
+        && incoming().id == existing().id
+        && incoming().fromUid == existing().fromUid
+        && incoming().toUid == existing().toUid
+        && incoming().participants == existing().participants
+        && incoming().createdAtMs == existing().createdAtMs
+        && (
+          (existing().toUid == request.auth.uid
+            && existing().status == 'pending'
+            && incoming().status in ['accepted', 'rejected']
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAtMs']))
+          || (existing().fromUid == request.auth.uid
+            && existing().status == 'rejected'
+            && incoming().status == 'pending'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAtMs']))
+        );
+
+      allow delete: if isSignedIn()
+        && isValidId(requestId)
+        && (existing().fromUid == request.auth.uid || existing().toUid == request.auth.uid);
+    }
+
+    // =========================================================================
+    // 5. مجموعة الصداقات المتبادلة المؤكدة: /friendships/{friendshipId}
+    // =========================================================================
+    match /friendships/{friendshipId} {
+      allow get: if isSignedIn()
+        && isValidId(friendshipId)
+        && (resource == null || request.auth.uid in existing().participants);
+
+      allow list: if isSignedIn()
+        && request.auth.uid in existing().participants;
+
+      allow create: if isSignedIn()
+        && isValidId(friendshipId)
+        && isValidFriendship(incoming())
+        && request.auth.uid in incoming().participants;
+
+      allow update: if isSignedIn()
+        && isValidId(friendshipId)
+        && isValidFriendship(incoming())
+        && request.auth.uid in existing().participants
+        && incoming().id == existing().id
+        && incoming().chatId == existing().chatId
+        && incoming().participants == existing().participants
+        && incoming().createdAtMs == existing().createdAtMs
+        && incoming().diff(existing()).affectedKeys().hasOnly(['memberProfiles', 'updatedAtMs']);
+
+      allow delete: if isSignedIn()
+        && isValidId(friendshipId)
+        && request.auth.uid in existing().participants;
+    }
+
+    // =========================================================================
+    // 6. مجموعة الدردشة الخاصة المحمية بالمشاركين فقط: /chats/{chatId} و /messages/{messageId}
     // =========================================================================
     match /chats/{chatId} {
-      allow read: if isSignedIn()
-        && request.auth.uid in resource.data.participants;
+      allow get: if isSignedIn()
+        && isValidId(chatId)
+        && (resource == null || request.auth.uid in existing().participants);
+
+      allow list: if isSignedIn()
+        && request.auth.uid in existing().participants;
 
       allow create: if isSignedIn()
         && isValidId(chatId)
-        && incoming().participants is list
-        && incoming().participants.size() == 2
+        && isValidChatThread(incoming())
         && request.auth.uid in incoming().participants;
 
       allow update: if isSignedIn()
         && isValidId(chatId)
-        && request.auth.uid in resource.data.participants
-        && incoming().participants == resource.data.participants;
+        && isValidChatThread(incoming())
+        && request.auth.uid in existing().participants
+        && incoming().chatId == existing().chatId
+        && incoming().participants == existing().participants
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'participantPlayerIds',
+          'lastMessageText',
+          'lastMessageSenderUid',
+          'lastMessageSenderName',
+          'lastMessageAtMs',
+          'unreadByUid',
+          'lastReadAtMs',
+          'updatedAtMs'
+        ]);
 
       allow delete: if false;
 
       match /messages/{messageId} {
-        allow read: if isSignedIn()
-          && (
-            ('participants' in resource.data && request.auth.uid in resource.data.participants)
-            || request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants
-          );
+        allow get: if isSignedIn()
+          && isValidId(chatId)
+          && isValidId(messageId)
+          && (resource == null || request.auth.uid in existing().participants);
+
+        allow list: if isSignedIn()
+          && request.auth.uid in existing().participants;
 
         allow create: if isSignedIn()
+          && isValidId(chatId)
           && isValidId(messageId)
-          && incoming().senderUid == request.auth.uid
-          && incoming().participants is list
-          && incoming().participants.size() == 2
-          && request.auth.uid in incoming().participants
-          && request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants
-          && incoming().text is string
-          && incoming().text.size() >= 1
-          && incoming().text.size() <= 500;
+          && isValidChatMessage(incoming())
+          && exists(/databases/$(database)/documents/chats/$(chatId))
+          && request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants;
 
         allow update: if isSignedIn()
-          && (
-            ('participants' in resource.data && request.auth.uid in resource.data.participants)
-            || request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants
-          )
+          && isValidId(chatId)
+          && isValidId(messageId)
+          && request.auth.uid in existing().participants
+          && incoming().id == existing().id
+          && incoming().threadId == existing().threadId
+          && incoming().participants == existing().participants
+          && incoming().senderUid == existing().senderUid
+          && incoming().senderId == existing().senderId
+          && incoming().receiverId == existing().receiverId
           && incoming().text == existing().text
-          && incoming().senderUid == existing().senderUid;
+          && incoming().createdAtIso == existing().createdAtIso
+          && incoming().createdAtMs == existing().createdAtMs
+          && incoming().status in ['sent', 'delivered', 'read']
+          && incoming().diff(existing()).affectedKeys().hasOnly(['status']);
 
         allow delete: if false;
       }
     }
 
     // =========================================================================
-    // 5. مجموعة طلبات التحقق الخادمي من إيصالات شراء VIP: /vip_verifications/{receiptId}
+    // 7. مجموعة طلبات التحقق الخادمي من إيصالات شراء VIP: /vip_verifications/{receiptId}
     // =========================================================================
     match /vip_verifications/{receiptId} {
       allow read: if isSignedIn() && existing().uid == request.auth.uid;
@@ -726,12 +1021,11 @@ service cloud.firestore {
         && incoming().storeProvider in ['google_play', 'app_store']
         && incoming().status == 'pending_server_verification';
 
-      // الترقية الفعلية لحقول vipTier و adsRemoved والعملات تتم حصرياً عبر الخادم (Cloud Function / Admin SDK)
       allow update, delete: if false;
     }
 
     // =========================================================================
-    // 6. مجموعة تذاكر خدمة العملاء والدعم الفني: /support_tickets/{ticketId}
+    // 8. مجموعة تذاكر خدمة العملاء والدعم الفني: /support_tickets/{ticketId}
     // =========================================================================
     match /support_tickets/{ticketId} {
       allow read: if isSignedIn() && existing().uid == request.auth.uid;
@@ -755,7 +1049,32 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // 7. وثيقة فحص الاتصال السحابي: /test/connection
+    // 9. مجموعة حالة الاتصال الفورية للأصدقاء: /presence/{uid}
+    // =========================================================================
+    match /presence/{uid} {
+      allow get: if isSignedIn() && isValidId(uid);
+      allow list: if false;
+
+      allow create: if isOwner(uid)
+        && isValidId(uid)
+        && isValidPresence(incoming(), uid);
+
+      allow update: if isOwner(uid)
+        && isValidId(uid)
+        && isValidPresence(incoming(), uid)
+        && incoming().uid == existing().uid
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'online',
+          'lastSeenMs',
+          'heartbeatAt',
+          'updatedAtMs'
+        ]);
+
+      allow delete: if false;
+    }
+
+    // =========================================================================
+    // 10. وثيقة فحص الاتصال السحابي: /test/connection
     // =========================================================================
     match /test/connection {
       allow read: if true;

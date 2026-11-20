@@ -11,7 +11,6 @@ import { soundEngine } from '../utils/sound';
 import { getCountryDisplayName, tr } from '../utils/i18n';
 import {
   Copy,
-  Share2,
   Check,
   Volume2,
   VolumeX,
@@ -54,7 +53,6 @@ export const ProfileAndSettingsView: React.FC<ProfileAndSettingsViewProps> = ({
   onRequestLogoutAccount,
 }) => {
   const [copiedId, setCopiedId] = useState(false);
-  const [sharedStatus, setSharedStatus] = useState<string | null>(null);
 
   const [editUsername, setEditUsername] = useState(profile.username);
   const [editCountry, setEditCountry] = useState<CountryInfo>(profile.country);
@@ -85,36 +83,6 @@ export const ProfileAndSettingsView: React.FC<ProfileAndSettingsViewProps> = ({
     } catch {
       setCopiedId(true);
       window.setTimeout(() => setCopiedId(false), 2000);
-    }
-  };
-
-  const handleSharePlayerId = async () => {
-    soundEngine.playClick();
-    const shareText = tr(
-      lang,
-      `انضم إليّ في تطبيق «قمة التحدي»! اسم اللاعب: ${profile.username} (${profile.country.flag}) — كود التعريف (Player ID): ${profile.playerId}`,
-      `Join me in "Peak of Challenge"! Player: ${profile.username} (${profile.country.flag}) — Player ID: ${profile.playerId}`
-    );
-    if (navigator.share) {
-      try {
-        await navigator.share({
-          title: tr(lang, 'قمة التحدي - كود اللاعب', 'Peak of Challenge - Player ID'),
-          text: shareText,
-        });
-        return;
-      } catch {
-        // Fallback to clipboard copy
-      }
-    }
-    try {
-      await navigator.clipboard.writeText(shareText);
-      setSharedStatus(
-        tr(lang, 'تم نسخ بطاقة التعريف للمشاركة!', 'Player card copied for sharing!')
-      );
-      window.setTimeout(() => setSharedStatus(null), 2500);
-    } catch {
-      setSharedStatus(tr(lang, 'تم تجهيز بطاقة التعريف!', 'Player card ready!'));
-      window.setTimeout(() => setSharedStatus(null), 2500);
     }
   };
 
@@ -244,7 +212,7 @@ export const ProfileAndSettingsView: React.FC<ProfileAndSettingsViewProps> = ({
           </div>
         </div>
 
-        {/* 10-Digit Unique Player ID Box with Copy & Share */}
+        {/* 10-Digit Unique Player ID Box with Copy */}
         <div className="p-4 rounded-xl bg-[#0B1120] border border-slate-800 space-y-3 shrink-0">
           <div className="text-xs text-slate-400">
             {tr(lang, 'كود التعريف الفريد (Player ID):', 'Unique Player ID:')}
@@ -253,39 +221,26 @@ export const ProfileAndSettingsView: React.FC<ProfileAndSettingsViewProps> = ({
             <span className="text-xl font-mono-num font-black tracking-wider text-amber-400">
               {profile.playerId}
             </span>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleCopyPlayerId}
-                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-bold text-slate-200 flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
-              >
-                {copiedId ? (
-                  <>
-                    <Check className="w-3.5 h-3.5 text-emerald-400" />
-                    <span className="text-emerald-400">
-                      {tr(lang, 'تم النسخ', 'Copied')}
-                    </span>
-                  </>
-                ) : (
-                  <>
-                    <Copy className="w-3.5 h-3.5" />
-                    <span>{tr(lang, 'نسخ الكود', 'Copy ID')}</span>
-                  </>
-                )}
-              </button>
-              <button
-                type="button"
-                onClick={handleSharePlayerId}
-                className="px-3 py-1.5 rounded-lg bg-cyan-500/20 border border-cyan-500/40 hover:bg-cyan-500/30 text-xs font-bold text-cyan-300 flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
-              >
-                <Share2 className="w-3.5 h-3.5" />
-                <span>{tr(lang, 'مشاركة', 'Share')}</span>
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={handleCopyPlayerId}
+              className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-bold text-slate-200 flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+            >
+              {copiedId ? (
+                <>
+                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                  <span className="text-emerald-400">
+                    {tr(lang, 'تم النسخ', 'Copied')}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <Copy className="w-3.5 h-3.5" />
+                  <span>{tr(lang, 'نسخ الكود', 'Copy ID')}</span>
+                </>
+              )}
+            </button>
           </div>
-          {sharedStatus && (
-            <div className="text-[11px] text-emerald-400 font-semibold">{sharedStatus}</div>
-          )}
         </div>
       </div>
 

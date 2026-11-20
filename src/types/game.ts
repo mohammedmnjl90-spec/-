@@ -116,6 +116,7 @@ export interface SupportTicket {
 
 export interface FriendContact {
   uid?: string;
+  chatId?: string;
   playerId: string;
   username: string;
   country: CountryInfo;
@@ -125,7 +126,59 @@ export interface FriendContact {
   vipTier: VipTier;
   addedAtIso: string;
   isOnline: boolean;
+  lastSeenMs?: number;
   unreadCount: number;
+  lastMessageText?: string;
+  lastMessageAtMs?: number;
+}
+
+export interface UserPresence {
+  uid: string;
+  online: boolean;
+  lastSeenMs: number;
+  heartbeatServerMs?: number;
+  updatedAtMs: number;
+}
+
+export interface FriendRequest {
+  id: string; // `${fromUid}_${toUid}`
+  fromUid: string;
+  fromPlayerId: string;
+  fromUsername: string;
+  fromCountryCode: string;
+  fromCountryName: string;
+  fromCountryFlag: string;
+  fromLevel: number;
+  fromRankTitle: string;
+  fromRankTitleEn?: string;
+  fromVipTier: VipTier;
+  toUid: string;
+  toPlayerId: string;
+  toUsername: string;
+  toCountryCode: string;
+  toCountryName: string;
+  toCountryFlag: string;
+  toLevel: number;
+  toRankTitle: string;
+  toRankTitleEn?: string;
+  toVipTier: VipTier;
+  participants: [string, string]; // Sorted UIDs [uidA, uidB]
+  status: 'pending' | 'accepted' | 'rejected';
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export interface ChatThreadMeta {
+  chatId: string;
+  participants: [string, string]; // Sorted UIDs
+  participantPlayerIds?: [string, string];
+  lastMessageText: string;
+  lastMessageSenderUid: string;
+  lastMessageSenderName?: string;
+  lastMessageAtMs: number;
+  unreadByUid?: Record<string, number>;
+  lastReadAtMs?: Record<string, number>;
+  updatedAtMs: number;
 }
 
 export interface ChatMessage {
@@ -133,10 +186,12 @@ export interface ChatMessage {
   threadId: string; // chats/{chatId}/messages/{messageId}
   senderUid?: string;
   senderId: string;
+  receiverUid?: string;
   receiverId: string;
   text: string;
   createdAtIso: string;
   createdAtMs?: number;
+  createdAtServerMs?: number;
   status: 'sent' | 'delivered' | 'read';
 }
 

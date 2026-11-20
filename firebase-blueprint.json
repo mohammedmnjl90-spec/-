@@ -209,9 +209,79 @@
       },
       "required": ["uid", "username", "playerId", "createdAt"]
     },
+    "FriendRequest": {
+      "title": "Real-Time Friend Request",
+      "description": "Pending, accepted, or rejected friend request between two players, accessible only to participants.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "fromUid": { "type": "string", "maxLength": 128 },
+        "fromPlayerId": { "type": "string", "minLength": 10, "maxLength": 10 },
+        "fromUsername": { "type": "string", "minLength": 2, "maxLength": 30 },
+        "fromCountryCode": { "type": "string", "minLength": 2, "maxLength": 4 },
+        "fromCountryName": { "type": "string", "maxLength": 50 },
+        "fromCountryFlag": { "type": "string", "maxLength": 16 },
+        "fromLevel": { "type": "number" },
+        "fromRankTitle": { "type": "string", "maxLength": 40 },
+        "fromVipTier": { "type": "string", "enum": ["none", "bronze", "silver", "gold", "legend"] },
+        "toUid": { "type": "string", "maxLength": 128 },
+        "toPlayerId": { "type": "string", "minLength": 10, "maxLength": 10 },
+        "toUsername": { "type": "string", "minLength": 2, "maxLength": 30 },
+        "toCountryCode": { "type": "string", "minLength": 2, "maxLength": 4 },
+        "toCountryName": { "type": "string", "maxLength": 50 },
+        "toCountryFlag": { "type": "string", "maxLength": 16 },
+        "toLevel": { "type": "number" },
+        "toRankTitle": { "type": "string", "maxLength": 40 },
+        "toVipTier": { "type": "string", "enum": ["none", "bronze", "silver", "gold", "legend"] },
+        "participants": { "type": "array", "description": "Sorted array of two Firebase Auth UIDs" },
+        "status": { "type": "string", "enum": ["pending", "accepted", "rejected"] },
+        "createdAtMs": { "type": "number" },
+        "updatedAtMs": { "type": "number" }
+      },
+      "required": [
+        "id",
+        "fromUid",
+        "fromPlayerId",
+        "fromUsername",
+        "fromCountryCode",
+        "fromCountryName",
+        "fromCountryFlag",
+        "fromLevel",
+        "fromRankTitle",
+        "fromVipTier",
+        "toUid",
+        "toPlayerId",
+        "toUsername",
+        "toCountryCode",
+        "toCountryName",
+        "toCountryFlag",
+        "toLevel",
+        "toRankTitle",
+        "toVipTier",
+        "participants",
+        "status",
+        "createdAtMs",
+        "updatedAtMs"
+      ]
+    },
+    "Friendship": {
+      "title": "Mutual Friendship",
+      "description": "Confirmed mutual friendship linking two players and their canonical private chat thread.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "chatId": { "type": "string", "maxLength": 128 },
+        "participants": { "type": "array", "description": "Sorted array of two Firebase Auth UIDs" },
+        "participantPlayerIds": { "type": "array", "description": "Sorted array of two 10-digit player IDs" },
+        "memberProfiles": { "type": "object", "description": "Public profile snapshots keyed by UID" },
+        "createdAtMs": { "type": "number" },
+        "updatedAtMs": { "type": "number" }
+      },
+      "required": ["id", "chatId", "participants", "participantPlayerIds", "memberProfiles", "createdAtMs", "updatedAtMs"]
+    },
     "ChatThread": {
       "title": "Private Chat Thread",
-      "description": "Metadata document for private chat restricting access strictly to participants ([senderUid, receiverUid]).",
+      "description": "Metadata document for private chat restricting access strictly to sorted participants ([uidA, uidB]).",
       "type": "object",
       "properties": {
         "chatId": {
@@ -220,11 +290,32 @@
         },
         "participants": {
           "type": "array",
-          "description": "Array of two Firebase Auth UIDs [senderUid, receiverUid]"
+          "description": "Sorted array of two Firebase Auth UIDs"
         },
         "participantPlayerIds": {
           "type": "array",
-          "description": "Array of two 10-digit player IDs"
+          "description": "Sorted array of two 10-digit player IDs"
+        },
+        "lastMessageText": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "lastMessageSenderUid": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "lastMessageSenderName": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "lastMessageAtMs": {
+          "type": "number"
+        },
+        "unreadByUid": {
+          "type": "object"
+        },
+        "lastReadAtMs": {
+          "type": "object"
         },
         "updatedAtMs": {
           "type": "number"
@@ -234,7 +325,7 @@
     },
     "ChatMessage": {
       "title": "Private Chat Message",
-      "description": "Real-time private message inside a friend conversation thread protected by participants array.",
+      "description": "Real-time private message inside a friend conversation thread protected by sorted participants array.",
       "type": "object",
       "properties": {
         "id": {
@@ -247,7 +338,7 @@
         },
         "participants": {
           "type": "array",
-          "description": "Array of two Firebase Auth UIDs [senderUid, receiverUid]"
+          "description": "Sorted array of two Firebase Auth UIDs"
         },
         "senderUid": {
           "type": "string",
@@ -256,6 +347,10 @@
         "senderId": {
           "type": "string",
           "maxLength": 32
+        },
+        "receiverUid": {
+          "type": "string",
+          "maxLength": 128
         },
         "receiverId": {
           "type": "string",
@@ -413,6 +508,19 @@
         "createdAt",
         "createdAtMs"
       ]
+    },
+    "UserPresence": {
+      "title": "Real-Time User Presence",
+      "description": "Live online/offline heartbeat status per authenticated player UID.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "online": { "type": "boolean" },
+        "lastSeenMs": { "type": "number" },
+        "heartbeatAt": { "type": "string", "format": "date-time" },
+        "updatedAtMs": { "type": "number" }
+      },
+      "required": ["uid", "online", "lastSeenMs", "updatedAtMs"]
     }
   },
   "firestore": {
@@ -428,6 +536,14 @@
       "schema": { "$ref": "#/entities/UsernameReservation" },
       "description": "Global unique username reservations preventing duplicate names."
     },
+    "/friend_requests/{requestId}": {
+      "schema": { "$ref": "#/entities/FriendRequest" },
+      "description": "Real-time friend requests visible only to the sender and recipient."
+    },
+    "/friendships/{friendshipId}": {
+      "schema": { "$ref": "#/entities/Friendship" },
+      "description": "Confirmed mutual friendships synced in real time across both players."
+    },
     "/chats/{chatId}": {
       "schema": { "$ref": "#/entities/ChatThread" },
       "description": "Private chat thread documents accessible only to UIDs in participants."
@@ -435,6 +551,10 @@
     "/chats/{chatId}/messages/{messageId}": {
       "schema": { "$ref": "#/entities/ChatMessage" },
       "description": "Real-time private chat messages accessible only to UIDs in participants."
+    },
+    "/presence/{uid}": {
+      "schema": { "$ref": "#/entities/UserPresence" },
+      "description": "Real-time online/offline heartbeat status for friends."
     },
     "/vip_verifications/{receiptId}": {
       "schema": { "$ref": "#/entities/VipVerificationRequest" },

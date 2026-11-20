@@ -3,16 +3,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { onAuthStateChanged } from 'firebase/auth';
 import {
   AppLanguage,
   CategoryInfo,
-  ChatMessage,
+  ChatThreadMeta,
   CountryInfo,
   FriendContact,
+  FriendRequest,
   LifelinesInventory,
   PlayerProfile,
   SupportTicketCategory,
+  UserPresence,
   VipTier,
 } from './types/game';
 import { CATEGORIES } from './data/questions';
@@ -56,7 +59,7 @@ import {
   LogoutConfirmModal,
   triggerNativeAppExit,
 } from './components/ActionConfirmModals';
-import { ensureFirebaseAuthSession, testFirestoreConnection } from './firebaseConfig';
+import { auth, ensureFirebaseAuthSession, testFirestoreConnection } from './firebaseConfig';
 import {
   BookOpen,
   Moon,
@@ -83,6 +86,10 @@ import {
   Cloud,
   CloudOff,
   AlertCircle,
+  Bell,
+  UserPlus,
+  UserCheck,
+  X,
 } from 'lucide-react';
 
 type MainTab = 'arena' | 'friends' | 'leaderboard' | 'store' | 'profile';
@@ -154,6 +161,65 @@ export default function App() {
   );
   const [isCheckingNetwork, setIsCheckingNetwork] = useState<boolean>(false);
   const [retryFailedCount, setRetryFailedCount] = useState<number>(0);
+
+  // Reactive Firebase Auth UID & Global Real-Time Social State (Friend Requests, Mutual Friendships, Instant Chat Metadata)
+  const [authUid, setAuthUid] = useState<string | null>(() => auth.currentUser?.uid ?? null);
+  const [incomingFriendRequests, setIncomingFriendRequests] = useState<FriendRequest[]>([]);
+  const [outgoingFriendRequests, setOutgoingFriendRequests] = useState<FriendRequest[]>([]);
+  const [cloudFriends, setCloudFriends] = useState<FriendContact[]>([]);
+  const [presenceByUid, setPresenceByUid] = useState<Record<string, UserPresence>>({});
+  const [serverClockOffsetMs, setServerClockOffsetMs] = useState<number>(0);
+  const [presenceNowMs, setPresenceNowMs] = useState<number>(() => Date.now());
+  const [chatsMetaByChatId, setChatsMetaByChatId] = useState<Record<string, ChatThreadMeta>>({});
+  const [requestedChatFriendUid, setRequestedChatFriendUid] = useState<string | null>(null);
+  const [socialToast, setSocialToast] = useState<{
+    id: string;
+    kind: 'friend_request' | 'new_message' | 'friend_accepted';
+    title: string;
+    body: string;
+    targetFriendUid?: string;
+  } | null>(null);
+
+  const activeChatFriendUidRef = useRef<string | null>(null);
+  const activeTabRef = useRef<MainTab>(activeTab);
+  const seenIncomingReqIdsRef = useRef<Set<string>>(new Set());
+  const initializedReqsRef = useRef<boolean>(false);
+  const seenFriendUidsRef = useRef<Set<string>>(new Set());
+  const initializedFriendsRef = useRef<boolean>(false);
+  const lastNotifiedChatMsgAtRef = useRef<Record<string, number>>({});
+  const initializedChatsRef = useRef<boolean>(false);
+  const toastTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    activeTabRef.current = activeTab;
+  }, [activeTab]);
+
+  // Keep authUid synchronized with Firebase Auth session restoration / login / logout
+  useEffect(() => {
+    const unsubAuth = onAuthStateChanged(auth, (user) => {
+      setAuthUid(user?.uid ?? null);
+    });
+    return () => unsubAuth();
+  }, []);
+
+  const showSocialToast = useCallback(
+    (payload: {
+      id: string;
+      kind: 'friend_request' | 'new_message' | 'friend_accepted';
+      title: string;
+      body: string;
+      targetFriendUid?: string;
+    }) => {
+      setSocialToast(payload);
+      if (toastTimerRef.current !== null) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+      toastTimerRef.current = window.setTimeout(() => {
+        setSocialToast((curr) => (curr?.id === payload.id ? null : curr));
+      }, 7500);
+    },
+    []
+  );
 
   const verifyOnlineConnectivity = useCallback(
     async (isManualRetry = false) => {
@@ -271,7 +337,7 @@ export default function App() {
 
   // Subscribe to real-time support tickets from Firestore for the current player
   useEffect(() => {
-    if (!profile) return;
+    if (!profile || !authUid) return;
     void storageRepo.syncProfileToFirestore(profile);
     const unsubTickets = storageRepo.subscribeToSupportTickets((cloudTickets) => {
       if (cloudTickets.length === 0) return;
@@ -284,7 +350,263 @@ export default function App() {
       });
     });
     return () => unsubTickets();
-  }, [profile?.playerId]);
+  }, [profile?.playerId, authUid]);
+
+  // Global real-time subscriptions for Friend Requests, Mutual Friendships, and Instant Chat Unread Alerts
+  useEffect(() => {
+    if (!authUid || !profile) {
+      setIncomingFriendRequests([]);
+      setOutgoingFriendRequests([]);
+      setCloudFriends([]);
+      setPresenceByUid({});
+      setChatsMetaByChatId({});
+      seenIncomingReqIdsRef.current = new Set();
+      initializedReqsRef.current = false;
+      seenFriendUidsRef.current = new Set();
+      initializedFriendsRef.current = false;
+      lastNotifiedChatMsgAtRef.current = {};
+      initializedChatsRef.current = false;
+      return;
+    }
+
+    const unsubRequests = storageRepo.subscribeToFriendRequests(
+      authUid,
+      ({ incoming, outgoing }) => {
+        setIncomingFriendRequests(incoming);
+        setOutgoingFriendRequests(outgoing);
+
+        if (!initializedReqsRef.current) {
+          initializedReqsRef.current = true;
+          incoming.forEach((req) => seenIncomingReqIdsRef.current.add(req.id));
+          if (incoming.length > 0) {
+            const latest = incoming[0];
+            showSocialToast({
+              id: `req_init_${latest.id}_${Date.now()}`,
+              kind: 'friend_request',
+              title: tr(lang, 'لديك طلب صداقة جديد!', 'New Friend Request!'),
+              body:
+                incoming.length === 1
+                  ? tr(
+                      lang,
+                      `أرسل لك «${latest.fromUsername}» طلب صداقة. اضغط للقبول أو الرفض.`,
+                      `"${latest.fromUsername}" sent you a friend request.`
+                    )
+                  : tr(
+                      lang,
+                      `لديك ${incoming.length} طلبات صداقة جديدة بانتظار ردّك.`,
+                      `You have ${incoming.length} pending friend requests.`
+                    ),
+            });
+          }
+          return;
+        }
+
+        // Detect newly arrived incoming friend requests in real time
+        const brandNew = incoming.filter((req) => !seenIncomingReqIdsRef.current.has(req.id));
+        incoming.forEach((req) => seenIncomingReqIdsRef.current.add(req.id));
+
+        if (brandNew.length > 0) {
+          const newest = brandNew[0];
+          soundEngine.playReward();
+          showSocialToast({
+            id: `req_${newest.id}_${Date.now()}`,
+            kind: 'friend_request',
+            title: tr(lang, 'طلب صداقة جديد!', 'New Friend Request!'),
+            body: tr(
+              lang,
+              `أرسل لك «${newest.fromUsername}» ${newest.fromCountryFlag || ''} طلب صداقة جديد.`,
+              `"${newest.fromUsername}" ${newest.fromCountryFlag || ''} sent you a friend request.`
+            ),
+          });
+        }
+      }
+    );
+
+    const unsubFriendships = storageRepo.subscribeToFriendships(authUid, (nextFriends) => {
+      setCloudFriends(nextFriends);
+
+      if (!initializedFriendsRef.current) {
+        initializedFriendsRef.current = true;
+        nextFriends.forEach((f) => {
+          if (f.uid) seenFriendUidsRef.current.add(f.uid);
+        });
+        return;
+      }
+
+      const newlyAdded = nextFriends.filter(
+        (f) => f.uid && !seenFriendUidsRef.current.has(f.uid)
+      );
+      nextFriends.forEach((f) => {
+        if (f.uid) seenFriendUidsRef.current.add(f.uid);
+      });
+
+      if (newlyAdded.length > 0) {
+        const newestFriend = newlyAdded[0];
+        soundEngine.playReward();
+        showSocialToast({
+          id: `friend_acc_${newestFriend.uid}_${Date.now()}`,
+          kind: 'friend_accepted',
+          title: tr(lang, 'تمت إضافة صديق جديد!', 'New Friend Added!'),
+          body: tr(
+            lang,
+            `أصبحت أنت و«${newestFriend.username}» أصدقاء الآن! يمكنك بدء الدردشة فوراً.`,
+            `You and "${newestFriend.username}" are now friends! Start chatting now.`
+          ),
+          targetFriendUid: newestFriend.uid,
+        });
+      }
+    });
+
+    const unsubChats = storageRepo.subscribeToUserChatsMetadata(authUid, (nextChats) => {
+      setChatsMetaByChatId(nextChats);
+
+      if (!initializedChatsRef.current) {
+        initializedChatsRef.current = true;
+        Object.values(nextChats).forEach((meta) => {
+          lastNotifiedChatMsgAtRef.current[meta.chatId] = meta.lastMessageAtMs || 0;
+        });
+        return;
+      }
+
+      Object.values(nextChats).forEach((meta) => {
+        const prevAt = lastNotifiedChatMsgAtRef.current[meta.chatId] || 0;
+        const currAt = meta.lastMessageAtMs || 0;
+        if (currAt > prevAt) {
+          lastNotifiedChatMsgAtRef.current[meta.chatId] = currAt;
+
+          const senderUid = meta.lastMessageSenderUid;
+          const unreadForMe = Number(meta.unreadByUid?.[authUid] || 0);
+          const isViewingThisChat =
+            activeTabRef.current === 'friends' &&
+            activeChatFriendUidRef.current === senderUid;
+
+          if (senderUid && senderUid !== authUid && unreadForMe > 0 && !isViewingThisChat) {
+            soundEngine.playClick();
+            const senderLabel =
+              meta.lastMessageSenderName || tr(lang, 'صديقك', 'Your friend');
+            showSocialToast({
+              id: `msg_${meta.chatId}_${currAt}`,
+              kind: 'new_message',
+              title: tr(lang, `رسالة جديدة من ${senderLabel}`, `New message from ${senderLabel}`),
+              body: meta.lastMessageText || tr(lang, 'أرسل لك رسالة جديدة', 'Sent you a message'),
+              targetFriendUid: senderUid,
+            });
+          }
+        }
+      });
+    });
+
+    return () => {
+      unsubRequests();
+      unsubFriendships();
+      unsubChats();
+    };
+  }, [authUid, profile?.playerId, lang, showSocialToast]);
+
+  // Publish genuine real-time presence heartbeat (`/presence/{authUid}`) & track Firestore server clock offset
+  useEffect(() => {
+    if (!authUid || !profile) return;
+
+    const publishNow = (onlineState: boolean) => {
+      void storageRepo.updateMyPresenceAsync(authUid, onlineState);
+    };
+
+    if (!isOnline) {
+      publishNow(false);
+      return;
+    }
+
+    const isVisible = typeof document === 'undefined' || document.visibilityState === 'visible';
+    publishNow(isVisible);
+
+    const unsubClockOffset = storageRepo.subscribeToMyPresenceClockOffset(
+      authUid,
+      (offsetMs) => {
+        setServerClockOffsetMs(offsetMs);
+      }
+    );
+
+    const heartbeatTimer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        publishNow(true);
+      }
+    }, 25000);
+
+    const handleVisibilityChange = () => {
+      publishNow(document.visibilityState === 'visible');
+    };
+
+    const handlePageExit = () => {
+      publishNow(false);
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('pagehide', handlePageExit);
+    window.addEventListener('beforeunload', handlePageExit);
+
+    return () => {
+      unsubClockOffset();
+      window.clearInterval(heartbeatTimer);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('pagehide', handlePageExit);
+      window.removeEventListener('beforeunload', handlePageExit);
+    };
+  }, [authUid, profile?.playerId, isOnline]);
+
+  // Local 15-second freshness ticker so friends whose connection drops expire cleanly to offline after 70s
+  useEffect(() => {
+    const ticker = window.setInterval(() => {
+      setPresenceNowMs(Date.now());
+    }, 15000);
+    return () => window.clearInterval(ticker);
+  }, []);
+
+  const friendUidsKey = useMemo(
+    () =>
+      cloudFriends
+        .map((f) => f.uid || '')
+        .filter(Boolean)
+        .sort()
+        .join(','),
+    [cloudFriends]
+  );
+
+  // Subscribe to real-time `/presence/{friendUid}` docs for every confirmed friend
+  useEffect(() => {
+    if (!authUid || !friendUidsKey) {
+      setPresenceByUid({});
+      return;
+    }
+    const uids = friendUidsKey.split(',').filter(Boolean);
+    const unsubPresence = storageRepo.subscribeToFriendsPresence(uids, (nextPresence) => {
+      setPresenceByUid(nextPresence);
+      setPresenceNowMs(Date.now());
+    });
+    return () => unsubPresence();
+  }, [authUid, friendUidsKey]);
+
+  // Combine confirmed mutual friendships with live clock-skew-adjusted online/offline presence
+  const friendsWithLivePresence = useMemo(() => {
+    const ONLINE_FRESHNESS_MS = 70_000;
+    return cloudFriends.map((friend) => {
+      const p = friend.uid ? presenceByUid[friend.uid] : undefined;
+      if (!p) {
+        return { ...friend, isOnline: false, lastSeenMs: undefined };
+      }
+      const adjustedNowMs = presenceNowMs + serverClockOffsetMs;
+      const isTrulyOnline = Boolean(
+        p.online &&
+          (p.heartbeatServerMs
+            ? adjustedNowMs - p.heartbeatServerMs < ONLINE_FRESHNESS_MS
+            : p.lastSeenMs > 0 && presenceNowMs - p.lastSeenMs < ONLINE_FRESHNESS_MS)
+      );
+      return {
+        ...friend,
+        isOnline: isTrulyOnline,
+        lastSeenMs: p.heartbeatServerMs || p.lastSeenMs || undefined,
+      };
+    });
+  }, [cloudFriends, presenceByUid, presenceNowMs, serverClockOffsetMs]);
 
   // Apply RTL/LTR document direction whenever language changes
   useEffect(() => {
@@ -399,10 +721,20 @@ export default function App() {
   };
 
   const handleConfirmLogoutAccount = () => {
+    if (authUid) {
+      void storageRepo.updateMyPresenceAsync(authUid, false);
+    }
     storageRepo.logoutCurrentProfile();
     setOpenModal(null);
     setActiveMatchCategory(null);
     setActiveTab('arena');
+    setIncomingFriendRequests([]);
+    setOutgoingFriendRequests([]);
+    setCloudFriends([]);
+    setPresenceByUid({});
+    setChatsMetaByChatId({});
+    setSocialToast(null);
+    setRequestedChatFriendUid(null);
     setProfile(null);
     setAuthInitialMode('auth');
     setShowSplash(true);
@@ -621,60 +953,45 @@ export default function App() {
     setShowHourlyInterstitialAd(false);
   };
 
-  const handleAddFriend = async (identifier: string) => {
+  const handleSendFriendRequest = async (identifier: string) => {
     if (!profile) {
       return { ok: false as const, error: tr(lang, 'غير مسجل', 'Not logged in') };
     }
-    const result = await storageRepo.addFriendByIdentifierAsync(profile, identifier, lang);
-    if (result.ok) {
-      setProfile(result.profile);
-      return { ok: true as const, friend: result.friend };
-    }
-    return { ok: false as const, error: result.error };
+    return storageRepo.sendFriendRequestAsync(profile, identifier, lang);
   };
 
-  const handleCloudMessagesReceived = useCallback(
-    (friendId: string, cloudMessages: ChatMessage[]) => {
-      setProfile((prev) => {
-        if (!prev) return prev;
-        return {
-          ...prev,
-          chatThreads: {
-            ...(prev.chatThreads || {}),
-            [friendId]: cloudMessages,
-          },
-        };
-      });
+  const handleAcceptFriendRequest = async (request: FriendRequest) => {
+    if (!profile) {
+      return { ok: false as const, error: tr(lang, 'غير مسجل', 'Not logged in') };
+    }
+    return storageRepo.acceptFriendRequestAsync(profile, request, lang);
+  };
+
+  const handleRejectOrCancelFriendRequest = async (requestId: string) => {
+    return storageRepo.rejectOrCancelFriendRequestAsync(requestId, lang);
+  };
+
+  const handleSendPrivateMessage = async (friend: FriendContact, text: string) => {
+    if (!profile) {
+      return { ok: false as const, error: tr(lang, 'غير مسجل', 'Not logged in') };
+    }
+    return storageRepo.sendPrivateChatMessageAsync(profile, friend, text, lang);
+  };
+
+  const handleMarkCloudChatAsRead = useCallback(
+    (friend: FriendContact) => {
+      if (!authUid) return;
+      const key = storageRepo.getCloudChatKey(authUid, friend);
+      if (key?.chatId) {
+        void storageRepo.markCloudChatAsReadAsync(authUid, key.chatId);
+      }
     },
-    []
+    [authUid]
   );
 
-  const handleSendPrivateMessage = (friend: FriendContact, text: string) => {
-    if (!profile) return;
-    const afterSend = storageRepo.sendPrivateChatMessage(profile, friend.playerId, text);
-    setProfile(afterSend.profile);
-
-    // Trigger smart interactive friend reply after 1.1s
-    window.setTimeout(() => {
-      setProfile((latestProfile) => {
-        if (!latestProfile) return latestProfile;
-        const afterReply = storageRepo.receiveFriendAutoReply(
-          latestProfile,
-          friend,
-          text,
-          lang
-        );
-        soundEngine.playClick();
-        return afterReply;
-      });
-    }, 1100);
-  };
-
-  const handleSelectFriendThread = (friendId: string) => {
-    if (!profile) return;
-    const updated = storageRepo.markThreadAsRead(profile, friendId);
-    setProfile(updated);
-  };
+  const handleActiveFriendUidChange = useCallback((friendUid: string | null) => {
+    activeChatFriendUidRef.current = friendUid;
+  }, []);
 
   const handleUpdateIdentity = (newUsername: string, newCountry: CountryInfo) => {
     if (!profile) return;
@@ -785,10 +1102,14 @@ export default function App() {
     (m) => m.progress >= m.target && !m.claimed
   ).length;
 
-  const totalUnreadFriendMessages = (profile.friends || []).reduce(
-    (acc, f) => acc + (f.unreadCount || 0),
-    0
-  );
+  const pendingFriendRequestsCount = incomingFriendRequests.length;
+  const totalUnreadFriendMessages = authUid
+    ? Object.values(chatsMetaByChatId).reduce(
+        (sum, meta) => sum + Number(meta.unreadByUid?.[authUid] || 0),
+        0
+      )
+    : 0;
+  const totalFriendsNotifications = pendingFriendRequestsCount + totalUnreadFriendMessages;
 
   const leaderboardList = storageRepo.getLeaderboardWithUser(profile);
   const userIdx = leaderboardList.findIndex((entry) => entry.isCurrentUser);
@@ -890,9 +1211,9 @@ export default function App() {
             }`}
           >
             <span>{tr(lang, '💬 الأصدقاء', '💬 Friends')}</span>
-            {totalUnreadFriendMessages > 0 && (
-              <span className="px-1.5 py-0.5 rounded-md bg-rose-500 text-white text-[10px] font-mono-num font-black">
-                {totalUnreadFriendMessages}
+            {totalFriendsNotifications > 0 && (
+              <span className="relative flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full bg-rose-500 text-white text-[10px] font-mono-num font-black shadow-sm shadow-rose-500/50">
+                {totalFriendsNotifications > 9 ? '9+' : totalFriendsNotifications}
               </span>
             )}
           </a>
@@ -1007,9 +1328,11 @@ export default function App() {
               soundEngine.playClick();
               setActiveMatchCategory(cocktailCategory);
             }}
-            className="px-4 py-2 text-xs font-extrabold text-slate-950 bg-gradient-to-l from-cyan-400 to-amber-400 rounded-lg hover:opacity-95 transition-opacity whitespace-nowrap shrink-0 cursor-pointer"
+            title={tr(lang, 'تحدي سريع', 'Quick Challenge')}
+            aria-label={tr(lang, 'تحدي سريع', 'Quick Challenge')}
+            className="w-9 h-9 rounded-xl bg-gradient-to-br from-cyan-400 via-sky-400 to-amber-400 text-slate-950 shadow-md shadow-cyan-500/25 hover:brightness-110 hover:scale-105 active:scale-95 transition-all flex items-center justify-center shrink-0 cursor-pointer"
           >
-            {tr(lang, 'ابدأ التحدي الآن 🚀', 'Start Challenge 🚀')}
+            <Play className="w-4 h-4 fill-current" />
           </button>
         </div>
       </header>
@@ -1074,11 +1397,16 @@ export default function App() {
             setActiveMatchCategory(null);
             setActiveTab('friends');
           }}
-          className={`py-2 rounded-lg whitespace-nowrap truncate cursor-pointer ${
+          className={`relative py-2 rounded-lg whitespace-nowrap truncate cursor-pointer ${
             activeTab === 'friends' ? 'bg-cyan-500/20 text-cyan-300' : 'text-slate-400'
           }`}
         >
-          {tr(lang, '💬 الأصدقاء', '💬 Friends')}
+          <span>{tr(lang, '💬 الأصدقاء', '💬 Friends')}</span>
+          {totalFriendsNotifications > 0 && (
+            <span className="absolute top-0.5 end-1 min-w-[16px] h-4 px-1 rounded-full bg-rose-500 text-white text-[9px] font-mono-num font-black flex items-center justify-center shadow-sm shadow-rose-500/50">
+              {totalFriendsNotifications > 9 ? '9+' : totalFriendsNotifications}
+            </span>
+          )}
         </button>
         <button
           type="button"
@@ -1121,16 +1449,101 @@ export default function App() {
         </button>
       </div>
 
+      {/* Real-Time Top Notification Toast (Friend Requests, Accepted Friends & Instant Messages) */}
+      {socialToast && (
+        <div className="fixed top-16 inset-x-0 z-40 px-4 pointer-events-none flex justify-center">
+          <div
+            className={`pointer-events-auto max-w-md w-full rounded-2xl border p-3.5 shadow-2xl backdrop-blur-md flex items-center justify-between gap-3 ${
+              socialToast.kind === 'friend_request'
+                ? 'bg-[#180E16]/95 border-rose-500/60 shadow-rose-500/20'
+                : socialToast.kind === 'friend_accepted'
+                ? 'bg-[#091D16]/95 border-emerald-500/60 shadow-emerald-500/20'
+                : 'bg-[#0B172A]/95 border-cyan-400/60 shadow-cyan-500/20'
+            }`}
+          >
+            <div className="flex items-center gap-3 min-w-0">
+              <div
+                className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
+                  socialToast.kind === 'friend_request'
+                    ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40'
+                    : socialToast.kind === 'friend_accepted'
+                    ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
+                    : 'bg-cyan-500/20 text-cyan-300 border border-cyan-400/40'
+                }`}
+              >
+                {socialToast.kind === 'friend_request' ? (
+                  <UserPlus className="w-5 h-5" />
+                ) : socialToast.kind === 'friend_accepted' ? (
+                  <UserCheck className="w-5 h-5" />
+                ) : (
+                  <Bell className="w-5 h-5" />
+                )}
+              </div>
+              <div className="min-w-0">
+                <div className="text-xs font-black text-white truncate">
+                  {socialToast.title}
+                </div>
+                <div className="text-[11px] text-slate-300 truncate mt-0.5">
+                  {socialToast.body}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  soundEngine.playClick();
+                  if (socialToast.targetFriendUid) {
+                    setRequestedChatFriendUid(socialToast.targetFriendUid);
+                  }
+                  setActiveMatchCategory(null);
+                  setActiveTab('friends');
+                  setSocialToast(null);
+                }}
+                className={`px-3 py-1.5 rounded-lg text-[11px] font-black cursor-pointer whitespace-nowrap transition-colors ${
+                  socialToast.kind === 'friend_request'
+                    ? 'bg-rose-500 hover:bg-rose-400 text-white'
+                    : socialToast.kind === 'friend_accepted'
+                    ? 'bg-emerald-400 hover:bg-emerald-300 text-slate-950'
+                    : 'bg-cyan-400 hover:bg-cyan-300 text-slate-950'
+                }`}
+              >
+                {socialToast.kind === 'friend_request'
+                  ? tr(lang, 'عرض الطلب', 'View')
+                  : tr(lang, 'فتح الدردشة', 'Open')}
+              </button>
+              <button
+                type="button"
+                onClick={() => setSocialToast(null)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer"
+                aria-label={tr(lang, 'إغلاق الإشعار', 'Dismiss')}
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Main Content Container */}
       <main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 md:py-8">
         {activeTab === 'friends' ? (
           <FriendsAndChatView
             profile={profile}
+            authUid={authUid}
             lang={lang}
-            onAddFriend={handleAddFriend}
+            friends={friendsWithLivePresence}
+            incomingRequests={incomingFriendRequests}
+            outgoingRequests={outgoingFriendRequests}
+            chatsMetaByChatId={chatsMetaByChatId}
+            initialSelectedFriendUid={requestedChatFriendUid}
+            onActiveFriendUidChange={handleActiveFriendUidChange}
+            onSendFriendRequest={handleSendFriendRequest}
+            onAcceptFriendRequest={handleAcceptFriendRequest}
+            onRejectOrCancelFriendRequest={handleRejectOrCancelFriendRequest}
             onSendMessage={handleSendPrivateMessage}
-            onSelectFriendThread={handleSelectFriendThread}
-            onCloudMessagesReceived={handleCloudMessagesReceived}
+            onMarkChatAsRead={handleMarkCloudChatAsRead}
           />
         ) : activeTab === 'leaderboard' ? (
           <LeaderboardAndPrizesView profile={profile} lang={lang} />
@@ -1253,7 +1666,11 @@ export default function App() {
                     soundEngine.playClick();
                     setActiveTab('friends');
                   }}
-                  className="p-4 rounded-xl bg-[#0B1120] border border-cyan-500/30 hover:border-cyan-400 transition-all text-start flex items-center justify-between gap-3 cursor-pointer"
+                  className={`p-4 rounded-xl bg-[#0B1120] border transition-all text-start flex items-center justify-between gap-3 cursor-pointer ${
+                    totalFriendsNotifications > 0
+                      ? 'border-rose-500/60 hover:border-rose-400'
+                      : 'border-cyan-500/30 hover:border-cyan-400'
+                  }`}
                 >
                   <div className="space-y-1 min-w-0">
                     <div className="text-sm font-extrabold text-cyan-400 flex items-center gap-1.5">
@@ -1261,20 +1678,37 @@ export default function App() {
                       <span className="truncate">
                         {tr(lang, '💬 الأصدقاء', '💬 Friends')}
                       </span>
+                      {totalFriendsNotifications > 0 && (
+                        <span className="w-2.5 h-2.5 rounded-full bg-rose-500 animate-pulse shrink-0" />
+                      )}
                     </div>
                     <div className="text-xs text-slate-300 font-semibold truncate flex items-center gap-1.5">
                       <Users className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                       <span>
-                        {tr(
-                          lang,
-                          `${profile.friends?.length || 0} أصدقاء · دردشة فورية`,
-                          `${profile.friends?.length || 0} Friends · Private Chat`
-                        )}
+                        {pendingFriendRequestsCount > 0
+                          ? tr(
+                              lang,
+                              `${pendingFriendRequestsCount} طلب صداقة جديد!`,
+                              `${pendingFriendRequestsCount} new friend request(s)!`
+                            )
+                          : tr(
+                              lang,
+                              `${cloudFriends.length} أصدقاء · دردشة فورية`,
+                              `${cloudFriends.length} Friends · Live Chat`
+                            )}
                       </span>
                     </div>
                   </div>
-                  <span className="text-xs font-extrabold text-slate-950 bg-cyan-400 px-3 py-1.5 rounded-lg whitespace-nowrap shrink-0">
-                    {totalUnreadFriendMessages > 0
+                  <span
+                    className={`text-xs font-extrabold px-3 py-1.5 rounded-lg whitespace-nowrap shrink-0 ${
+                      totalFriendsNotifications > 0
+                        ? 'text-white bg-rose-500'
+                        : 'text-slate-950 bg-cyan-400'
+                    }`}
+                  >
+                    {pendingFriendRequestsCount > 0
+                      ? tr(lang, `طلبات (${pendingFriendRequestsCount})`, `Requests (${pendingFriendRequestsCount})`)
+                      : totalUnreadFriendMessages > 0
                       ? tr(lang, `رسائل (${totalUnreadFriendMessages})`, `Chat (${totalUnreadFriendMessages})`)
                       : tr(lang, 'دردشة', 'Open')}
                   </span>
