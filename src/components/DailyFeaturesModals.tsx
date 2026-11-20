@@ -4,6 +4,7 @@ import { getDailyBossQuestion } from '../data/questions';
 import { getVipMultiplier } from '../services/storageRepository';
 import { soundEngine } from '../utils/sound';
 import { tr } from '../utils/i18n';
+import { WithdrawMatchConfirmModal } from './ActionConfirmModals';
 import {
   X,
   Gift,
@@ -14,6 +15,8 @@ import {
   Coins,
   Sparkles,
   Timer,
+  LogOut,
+  Home,
 } from 'lucide-react';
 
 export interface SpinSegment {
@@ -283,22 +286,35 @@ export const SpinWheelModal: React.FC<SpinWheelModalProps> = ({
 interface DailyBossModalProps {
   profile: PlayerProfile;
   lang: AppLanguage;
+  isPausedByNetwork?: boolean;
   onClose: () => void;
   onFinishDailyBoss: (won: boolean) => void;
 }
 
+const DAILY_BOSS_TIME_LIMIT = 5;
+const BOSS_LETTERS_AR = ['أ', 'ب', 'ج', 'د'];
+const BOSS_LETTERS_EN = ['A', 'B', 'C', 'D'];
+
+/**
+ * Full-Screen Immersive Daily Boss Arena (`100dvh`) matching the main Arena Match HUD,
+ * dynamic color-shifting timer bar, unclipped full question card, 1-column mobile answer
+ * buttons with glow/shake feedback, and instant timer freeze on network disconnect.
+ */
 export const DailyBossModal: React.FC<DailyBossModalProps> = ({
   profile,
   lang,
+  isPausedByNetwork = false,
   onClose,
   onFinishDailyBoss,
 }) => {
   const [question] = useState(() => getDailyBossQuestion(profile.daily.dateKey, lang));
   const [started, setStarted] = useState(profile.daily.dailyBossAttempted);
-  const [timeLeft, setTimeLeft] = useState(5); // 5-second strict timer for Daily Boss
-  const remainingBossMsRef = useRef<number>(5000);
+  const [timeLeft, setTimeLeft] = useState(DAILY_BOSS_TIME_LIMIT);
+  const [timeProgressPct, setTimeProgressPct] = useState(100);
+  const remainingBossMsRef = useRef<number>(DAILY_BOSS_TIME_LIMIT * 1000);
   const [selectedOpt, setSelectedOpt] = useState<string | null>(null);
   const [locked, setLocked] = useState(profile.daily.dailyBossAttempted);
+  const [isWithdrawConfirmOpen, setIsWithdrawConfirmOpen] = useState(false);
   const onFinishDailyBossRef = useRef(onFinishDailyBoss);
 
   useEffect(() => {
@@ -306,7 +322,7 @@ export const DailyBossModal: React.FC<DailyBossModalProps> = ({
   }, [onFinishDailyBoss]);
 
   useEffect(() => {
-    if (!started || locked) return;
+    if (!started || locked || isWithdrawConfirmOpen || isPausedByNetwork) return;
 
     let lastTickMs = performance.now();
 
@@ -317,11 +333,19 @@ export const DailyBossModal: React.FC<DailyBossModalProps> = ({
 
       remainingBossMsRef.current = Math.max(0, remainingBossMsRef.current - deltaMs);
       const nextSeconds = Math.ceil(remainingBossMsRef.current / 1000);
+      const nextPct = Math.min(
+        100,
+        Math.max(
+          0,
+          Math.round((remainingBossMsRef.current / (DAILY_BOSS_TIME_LIMIT * 1000)) * 100)
+        )
+      );
 
+      setTimeProgressPct(nextPct);
       setTimeLeft((prevSeconds) => {
         if (nextSeconds !== prevSeconds) {
           if (nextSeconds > 0 && nextSeconds < prevSeconds) {
-            soundEngine.playTick(true);
+            soundEngine.playTick(nextSeconds <= 2);
           }
           return nextSeconds;
         }
@@ -337,10 +361,10 @@ export const DailyBossModal: React.FC<DailyBossModalProps> = ({
     }, 80);
 
     return () => window.clearInterval(timer);
-  }, [started, locked]);
+  }, [started, locked, isWithdrawConfirmOpen, isPausedByNetwork]);
 
   const handleSelect = (opt: string) => {
-    if (locked) return;
+    if (locked || isPausedByNetwork) return;
     setLocked(true);
     setSelectedOpt(opt);
     const won = opt === question.correctAnswer;
@@ -352,35 +376,105 @@ export const DailyBossModal: React.FC<DailyBossModalProps> = ({
     onFinishDailyBoss(won);
   };
 
-  return (
-    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="bg-[#111827] border border-purple-500/40 rounded-2xl max-w-xl w-full p-6 space-y-6 shadow-2xl">
-        <div className="flex items-center justify-between border-b border-slate-800 pb-4">
-          <div className="flex items-center gap-2">
-            <Flame className="w-5 h-5 text-purple-400" />
-            <h3 className="text-lg font-extrabold text-white">
-              {tr(lang, 'سؤال اليوم النادر (Daily Boss)', 'Daily Boss Question')}
-            </h3>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-300 cursor-pointer"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
+  const handleRequestExit = () => {
+    soundEngine.playClick();
+    if (started && !locked) {
+      setIsWithdrawConfirmOpen(true);
+    } else {
+      onClose();
+    }
+  };
 
-        {!started ? (
-          <div className="text-center space-y-5 py-4">
-            <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-purple-500/15 border border-purple-400/40 text-purple-300 mx-auto">
-              <Timer className="w-8 h-8" />
+  const isUrgentTime = timeLeft <= 2;
+  const isMidTime = timeLeft > 2 && timeProgressPct <= 60;
+  const progressBarClass = isUrgentTime
+    ? 'bg-rose-500 shadow-[0_0_16px_rgba(244,63,94,0.65)] animate-timer-pulse'
+    : isMidTime
+    ? 'bg-gradient-to-l from-amber-400 to-yellow-400'
+    : 'bg-gradient-to-l from-emerald-400 to-cyan-400';
+
+  const timerTextClass = isUrgentTime
+    ? 'text-rose-400 animate-timer-pulse'
+    : isMidTime
+    ? 'text-amber-400'
+    : 'text-cyan-400';
+
+  const optionLetters = lang === 'ar' ? BOSS_LETTERS_AR : BOSS_LETTERS_EN;
+
+  return (
+    <div className="fixed inset-0 z-40 h-[100dvh] w-full bg-[#080C16] text-slate-100 flex flex-col justify-between overflow-hidden select-none">
+      <div className="pointer-events-none absolute -top-28 right-1/4 w-80 h-80 rounded-full bg-purple-600/12 blur-3xl" />
+      <div className="pointer-events-none absolute -bottom-28 left-1/4 w-80 h-80 rounded-full bg-amber-500/8 blur-3xl" />
+
+      {/* Compact Game HUD */}
+      <header className="relative z-10 w-full bg-[#0B1120]/95 border-b border-slate-800/80 px-3.5 sm:px-6 pt-[max(0.65rem,env(safe-area-inset-top))] pb-2.5 shrink-0">
+        <div className="max-w-3xl mx-auto space-y-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <button
+              type="button"
+              onClick={handleRequestExit}
+              className="min-h-[40px] px-3 py-1.5 rounded-xl bg-[#111827] border border-rose-500/30 hover:border-rose-400/80 text-xs font-extrabold text-rose-300 cursor-pointer flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+            >
+              <LogOut className="w-3.5 h-3.5 shrink-0" />
+              <span>
+                {started && !locked
+                  ? tr(lang, 'انسحاب', 'Withdraw')
+                  : tr(lang, 'خروج', 'Exit')}
+              </span>
+            </button>
+
+            <div className="text-center min-w-0 px-1">
+              <div className="text-xs sm:text-sm font-black text-white flex items-center justify-center gap-1.5 whitespace-nowrap truncate">
+                <Flame className="w-4 h-4 text-purple-400 shrink-0" />
+                <span>{tr(lang, 'سؤال اليوم النادر', 'Daily Boss Challenge')}</span>
+              </div>
+              <div className="text-[11px] font-semibold text-slate-400">
+                {tr(lang, 'محاولة واحدة · 5 ثوانٍ', '1 Attempt · 5 Seconds')}
+              </div>
             </div>
-            <div className="space-y-2">
-              <h4 className="text-xl font-black text-white">
-                {tr(lang, 'تحدي الـ 5 ثوانٍ النادر!', 'Rare 5-Second Challenge!')}
-              </h4>
-              <p className="text-sm text-slate-300 max-w-md mx-auto">
+
+            <div className="min-h-[40px] px-3 py-1.5 rounded-xl bg-[#111827] border border-amber-500/35 flex items-center gap-1.5 whitespace-nowrap shrink-0 font-mono-num">
+              <Coins className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <span className="text-xs font-black text-amber-300">+35</span>
+            </div>
+          </div>
+
+          {started && (
+            <div className="flex items-center gap-2.5">
+              <div className="flex-1 h-2.5 bg-[#080C16] rounded-full overflow-hidden border border-slate-800">
+                <div
+                  className={`h-full rounded-full transition-[width,background-color] duration-100 ease-linear ${progressBarClass}`}
+                  style={{ width: `${locked ? 0 : timeProgressPct}%` }}
+                />
+              </div>
+              <div
+                className={`flex items-center gap-1 font-mono-num text-sm sm:text-base font-black whitespace-nowrap shrink-0 min-w-[54px] justify-end ${
+                  locked ? 'text-slate-500' : timerTextClass
+                }`}
+              >
+                <Timer className="w-3.5 h-3.5 shrink-0" />
+                <span>00:0{locked ? 0 : timeLeft}</span>
+              </div>
+            </div>
+          )}
+        </div>
+      </header>
+
+      {/* Center Content */}
+      <main className="relative z-10 flex-1 min-h-0 w-full max-w-3xl mx-auto px-3.5 sm:px-6 py-4 flex flex-col justify-center gap-4 overflow-y-auto">
+        {!started ? (
+          <div className="bg-[#111827] border border-purple-500/35 rounded-2xl p-6 sm:p-8 text-center space-y-6 shadow-2xl max-w-xl w-full mx-auto">
+            <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl bg-purple-500/15 border border-purple-400/40 text-purple-300 mx-auto">
+              <Timer className="w-10 h-10" />
+            </div>
+            <div className="space-y-2.5">
+              <h2
+                className="text-2xl sm:text-3xl font-black text-white"
+                style={{ textWrap: 'balance' }}
+              >
+                {tr(lang, 'تحدي الـ 5 ثوانٍ النادر', 'Rare 5-Second Challenge')}
+              </h2>
+              <p className="text-sm sm:text-base text-slate-300 max-w-md mx-auto leading-relaxed">
                 {tr(
                   lang,
                   'سؤال ثقافي نادر بمحاولة واحدة فقط يومياً ومهلة 5 ثوانٍ. الإجابة الصحيحة تمنحك فوراً +35 عملة ذهبية و +50 XP!',
@@ -390,96 +484,147 @@ export const DailyBossModal: React.FC<DailyBossModalProps> = ({
             </div>
             <button
               type="button"
+              disabled={isPausedByNetwork}
               onClick={() => {
                 soundEngine.playClick();
+                remainingBossMsRef.current = DAILY_BOSS_TIME_LIMIT * 1000;
+                setTimeLeft(DAILY_BOSS_TIME_LIMIT);
+                setTimeProgressPct(100);
                 setStarted(true);
               }}
-              className="w-full py-3.5 px-6 rounded-xl bg-gradient-to-l from-purple-500 to-indigo-600 hover:from-purple-400 hover:to-indigo-500 text-white font-extrabold text-sm cursor-pointer whitespace-nowrap"
+              className="w-full min-h-[52px] py-3.5 px-6 rounded-xl bg-gradient-to-l from-purple-500 to-indigo-600 hover:from-purple-400 hover:to-indigo-500 disabled:opacity-50 text-white font-black text-sm sm:text-base cursor-pointer shadow-lg shadow-purple-500/20 active:scale-[0.98] transition-all whitespace-nowrap"
             >
               {tr(
                 lang,
-                'أنا مستعد · اكشف سؤال اليوم الآن (5 ثوانٍ)',
-                'I am Ready · Reveal Daily Boss Question (5s)'
+                'أنا مستعد · ابدأ تحدي الـ 5 ثوانٍ',
+                'I am Ready · Start 5-Second Challenge'
               )}
             </button>
           </div>
         ) : (
-          <div className="space-y-5">
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-purple-300 font-bold">
-                {tr(lang, 'مكافأة الفوز: +35 عملة · +50 XP', 'Win Reward: +35 Coins · +50 XP')}
-              </span>
-              <span className="font-mono-num text-base font-black text-rose-400">
-                00:0{timeLeft}
-              </span>
-            </div>
-
-            <div className="p-5 rounded-xl bg-[#0B1120] border border-slate-800 space-y-4">
-              <p className="text-lg font-extrabold text-white leading-relaxed">
+          <>
+            {/* Unclipped Full Question Card */}
+            <section className="w-full rounded-2xl px-4 py-4 sm:px-7 sm:py-6 bg-[#111827] border border-purple-500/35 shadow-xl flex flex-col items-center justify-center">
+              <h2
+                className="text-[clamp(1.05rem,3.9vw,1.55rem)] font-extrabold text-white leading-relaxed text-center break-words w-full"
+                style={{ textWrap: 'balance' }}
+              >
                 {question.question}
-              </p>
+              </h2>
+            </section>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {question.options.map((opt, idx) => {
-                  const isCorrect = opt === question.correctAnswer;
-                  const isChosen = selectedOpt === opt;
+            {/* 4 Options: 1-Column Stack on Mobile, 2x2 on Desktop */}
+            <section className="grid grid-cols-1 md:grid-cols-2 gap-2.5 sm:gap-3.5 w-full">
+              {question.options.map((opt, idx) => {
+                const isCorrect = opt === question.correctAnswer;
+                const isChosen = selectedOpt === opt;
+                const isWrongChosen = locked && isChosen && !isCorrect;
+                const isCorrectRevealed = locked && isCorrect;
 
-                  let style = 'bg-[#111827] border-slate-700 hover:border-purple-400 text-slate-100';
-                  if (locked) {
-                    if (isCorrect) {
-                      style = 'bg-emerald-500/20 border-emerald-400 text-emerald-200';
-                    } else if (isChosen && !isCorrect) {
-                      style = 'bg-rose-500/20 border-rose-400 text-rose-200';
-                    } else {
-                      style = 'bg-[#111827]/50 border-slate-800 text-slate-500';
-                    }
+                let style =
+                  'bg-[#0F172A] border-slate-700/80 hover:border-purple-400/80 text-slate-100 active:scale-[0.985]';
+                let letterStyle = 'bg-[#080C16] border-slate-700 text-purple-300';
+
+                if (locked) {
+                  if (isCorrectRevealed) {
+                    style =
+                      'bg-emerald-500/20 border-emerald-400 text-emerald-100 shadow-[0_0_24px_-4px_rgba(16,185,129,0.6)]';
+                    letterStyle =
+                      'bg-emerald-500/25 border-emerald-400/70 text-emerald-200';
+                  } else if (isWrongChosen) {
+                    style =
+                      'bg-rose-500/20 border-rose-400 text-rose-100 shadow-[0_0_24px_-4px_rgba(244,63,94,0.6)] animate-answer-shake';
+                    letterStyle =
+                      'bg-rose-500/25 border-rose-400/70 text-rose-200';
+                  } else {
+                    style = 'bg-[#0B1120]/55 border-slate-800/70 text-slate-500 opacity-65';
+                    letterStyle = 'bg-[#080C16]/60 border-slate-800 text-slate-600';
                   }
+                }
 
-                  return (
-                    <button
-                      key={idx}
-                      type="button"
-                      disabled={locked}
-                      onClick={() => handleSelect(opt)}
-                      className={`p-3.5 rounded-xl border text-start font-bold text-sm flex items-center justify-between gap-2 cursor-pointer transition-all ${style}`}
-                    >
-                      <span>{opt}</span>
-                      {locked && isCorrect && (
-                        <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                      )}
-                      {locked && isChosen && !isCorrect && (
-                        <XCircle className="w-4 h-4 text-rose-400 shrink-0" />
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
+                return (
+                  <button
+                    key={idx}
+                    type="button"
+                    disabled={locked || isPausedByNetwork}
+                    onClick={() => handleSelect(opt)}
+                    className={`min-h-[50px] sm:min-h-[58px] px-3.5 sm:px-4 py-2.5 sm:py-3 rounded-xl border text-start font-bold text-sm sm:text-base flex items-center justify-between gap-3 cursor-pointer transition-all ${style}`}
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <span
+                        className={`w-7 h-7 sm:w-8 sm:h-8 rounded-lg border text-xs sm:text-sm font-black flex items-center justify-center shrink-0 ${letterStyle}`}
+                      >
+                        {optionLetters[idx] || idx + 1}
+                      </span>
+                      <span className="leading-snug break-words">{opt}</span>
+                    </div>
+                    {isCorrectRevealed && (
+                      <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+                    )}
+                    {isWrongChosen && (
+                      <XCircle className="w-5 h-5 text-rose-400 shrink-0" />
+                    )}
+                  </button>
+                );
+              })}
+            </section>
 
             {locked && (
               <div
-                className={`p-4 rounded-xl border text-center text-sm font-bold ${
+                className={`p-4 rounded-xl border text-center text-sm font-bold space-y-1 ${
                   profile.daily.dailyBossWon
-                    ? 'bg-emerald-500/15 border-emerald-400/40 text-emerald-300'
-                    : 'bg-rose-500/15 border-rose-400/40 text-rose-300'
+                    ? 'bg-emerald-500/15 border-emerald-400/40 text-emerald-200'
+                    : 'bg-rose-500/15 border-rose-400/40 text-rose-200'
                 }`}
               >
-                {profile.daily.dailyBossWon
-                  ? tr(
-                      lang,
-                      'إجابة عبقرية! حصلت على +35 عملة ذهبية و +50 XP.',
-                      'Brilliant answer! You earned +35 Gold Coins and +50 XP.'
-                    )
-                  : tr(
-                      lang,
-                      `انتهت محاولة اليوم! الإجابة الصحيحة هي: ${question.correctAnswer}`,
-                      `Today’s attempt ended! Correct answer: ${question.correctAnswer}`
-                    )}
+                <div>
+                  {profile.daily.dailyBossWon
+                    ? tr(
+                        lang,
+                        'إجابة عبقرية! حصلت على +35 عملة ذهبية و +50 XP.',
+                        'Brilliant answer! You earned +35 Gold Coins and +50 XP.'
+                      )
+                    : tr(
+                        lang,
+                        `انتهت محاولة اليوم! الإجابة الصحيحة هي: ${question.correctAnswer}`,
+                        `Today’s attempt ended! Correct answer: ${question.correctAnswer}`
+                      )}
+                </div>
               </div>
             )}
-          </div>
+          </>
         )}
-      </div>
+      </main>
+
+      {/* Bottom Action Footer */}
+      <footer className="relative z-10 w-full bg-[#0B1120]/95 border-t border-slate-800/80 px-3.5 sm:px-6 pt-2.5 pb-[max(0.75rem,env(safe-area-inset-bottom))] shrink-0">
+        <div className="max-w-3xl mx-auto flex items-center justify-between gap-3">
+          <div className="text-xs text-slate-400 font-semibold">
+            {tr(lang, 'مكافأة الفوز: +35 عملة · +50 XP', 'Win Reward: +35 Coins · +50 XP')}
+          </div>
+          {locked && (
+            <button
+              type="button"
+              onClick={() => {
+                soundEngine.playClick();
+                onClose();
+              }}
+              className="min-h-[44px] px-5 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-black text-xs sm:text-sm cursor-pointer flex items-center gap-2 whitespace-nowrap transition-colors"
+            >
+              <Home className="w-4 h-4" />
+              <span>{tr(lang, 'العودة للرئيسية', 'Back to Home')}</span>
+            </button>
+          )}
+        </div>
+      </footer>
+
+      {isWithdrawConfirmOpen && (
+        <WithdrawMatchConfirmModal
+          lang={lang}
+          onContinuePlaying={() => setIsWithdrawConfirmOpen(false)}
+          onConfirmWithdraw={onClose}
+        />
+      )}
     </div>
   );
 };

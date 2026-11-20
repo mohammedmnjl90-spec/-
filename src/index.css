@@ -32,3 +32,42 @@
 ::-webkit-scrollbar-thumb:hover {
   background: #334155;
 }
+
+@keyframes answer-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-6px); }
+  40% { transform: translateX(6px); }
+  60% { transform: translateX(-4px); }
+  80% { transform: translateX(4px); }
+}
+
+@keyframes score-pop {
+  0% { transform: scale(1); }
+  40% { transform: scale(1.18); }
+  100% { transform: scale(1); }
+}
+
+@keyframes timer-urgent-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.72; transform: scale(1.03); }
+}
+
+.animate-answer-shake {
+  animation: answer-shake 320ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.animate-score-pop {
+  animation: score-pop 280ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.animate-timer-pulse {
+  animation: timer-urgent-pulse 650ms ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-answer-shake,
+  .animate-score-pop,
+  .animate-timer-pulse {
+    animation: none;
+  }
+}

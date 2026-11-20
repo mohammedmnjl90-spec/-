@@ -14,8 +14,7 @@ import {
   doc,
   getDocFromServer,
   initializeFirestore,
-  persistentLocalCache,
-  persistentMultipleTabManager,
+  memoryLocalCache,
   Firestore,
 } from 'firebase/firestore';
 
@@ -34,13 +33,11 @@ export const firebaseConfig = {
 
 export const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 
-// Initialize Firestore with Offline-First IndexedDB persistence fallback
+// Initialize Firestore in strict Online-Only mode (in-memory session cache only, no offline IndexedDB persistence)
 let firestoreInstance: Firestore;
 try {
   firestoreInstance = initializeFirestore(app, {
-    localCache: persistentLocalCache({
-      tabManager: persistentMultipleTabManager(),
-    }),
+    localCache: memoryLocalCache(),
   });
 } catch {
   firestoreInstance = getFirestore(app);
@@ -281,36 +278,75 @@ export async function ensureFirebaseAuthSession(
 }
 
 /**
- * Connectivity check against Firestore server (`test/connection`).
+ * Determines whether a Firebase Auth or Firestore error was caused by
+ * genuine network / internet loss (as opposed to security rules or validation).
  */
-export async function testFirestoreConnection(): Promise<{
+export function isNetworkConnectivityError(error: unknown): boolean {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return true;
+  }
+  const rawMessage = error instanceof Error ? error.message : String(error || '');
+  const code =
+    typeof error === 'object' && error !== null && 'code' in error
+      ? String((error as { code?: unknown }).code || '')
+      : '';
+  const combined = `${code} ${rawMessage}`.toLowerCase();
+
+  return (
+    combined.includes('the client is offline') ||
+    combined.includes('client is offline') ||
+    combined.includes('network-request-failed') ||
+    combined.includes('failed to fetch') ||
+    combined.includes('networkerror') ||
+    combined.includes('unavailable') ||
+    combined.includes('connection_timeout') ||
+    combined.includes('err_internet_disconnected')
+  );
+}
+
+/**
+ * Real-time connectivity probe against Cloud Firestore server (`test/connection`)
+ * with a strict timeout so offline/stalled networks are caught immediately.
+ */
+export async function testFirestoreConnection(timeoutMs = 6000): Promise<{
   connected: boolean;
+  isNetworkError?: boolean;
   errorDetail?: string;
 }> {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
     return {
       connected: false,
-      errorDetail: 'Device is offline (لا يوجد اتصال بالإنترنت)',
+      isNetworkError: true,
+      errorDetail: 'لا يوجد اتصال بالإنترنت (Device is offline)',
     };
   }
+
+  let timeoutHandle: number | undefined;
   try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
-    return { connected: true };
+    const serverCheckPromise = getDocFromServer(doc(db, 'test', 'connection'));
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutHandle = window.setTimeout(() => {
+        reject(new Error('connection_timeout'));
+      }, timeoutMs);
+    });
+
+    await Promise.race([serverCheckPromise, timeoutPromise]);
+    return { connected: true, isNetworkError: false };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    if (
-      msg.includes('the client is offline') ||
-      msg.includes('unavailable') ||
-      msg.includes('network-request-failed')
-    ) {
-      console.warn('Firestore client is currently in offline mode — using local cache.');
+    if (isNetworkConnectivityError(error)) {
       return {
         connected: false,
+        isNetworkError: true,
         errorDetail: msg,
       };
     }
-    // Even if permission-denied on /test/connection before rules are pasted, server is reachable
-    return { connected: true };
+    // If Firestore responded with permission-denied, the server IS reachable over the internet
+    return { connected: true, isNetworkError: false };
+  } finally {
+    if (timeoutHandle !== undefined) {
+      window.clearTimeout(timeoutHandle);
+    }
   }
 }
 

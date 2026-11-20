@@ -38,6 +38,7 @@ import {
   ensureFirebaseAuthSession,
   formatFirebaseAuthOrFirestoreError,
   handleFirestoreError,
+  isNetworkConnectivityError,
   OperationType,
   phoneToSyntheticEmail,
   sendPasswordResetEmail,
@@ -573,14 +574,15 @@ function resolveCountryByCode(code?: string, fallback?: CountryInfo): CountryInf
 }
 
 /**
- * Hybrid Cloud Firestore + Offline-First LocalStorage Repository
- * - Automatically authenticates via Firebase Auth (signInAnonymously) and binds players/{uid}
+ * Online-Only Cloud Firestore Repository
+ * - Requires live internet & Firebase connectivity for active gameplay and syncing
  * - Reserves unique usernames globally in usernames/{nameNormalized}
  * - Enforces +2 max round points per cloud update, 50-day identity cooldown, and fairPlayScore integrity
  * - Provides real-time onSnapshot listeners for Leaderboard, Friends Private Chat, and Support Tickets
  */
 export interface CloudSyncStatus {
   connected: boolean;
+  isNetworkOffline: boolean;
   lastSyncedAtMs?: number;
   lastError: string | null;
 }
@@ -590,6 +592,7 @@ export class StorageRepository {
   private rateLimitRetryTimer: number | null = null;
   private cloudStatus: CloudSyncStatus = {
     connected: typeof navigator !== 'undefined' ? navigator.onLine !== false : true,
+    isNetworkOffline: typeof navigator !== 'undefined' ? navigator.onLine === false : false,
     lastError: null,
   };
   private cloudStatusListeners = new Set<(status: CloudSyncStatus) => void>();
@@ -608,9 +611,14 @@ export class StorageRepository {
     };
   }
 
-  public setCloudStatus(connected: boolean, lastError: string | null = null): void {
+  public setCloudStatus(
+    connected: boolean,
+    lastError: string | null = null,
+    isNetworkOffline = false
+  ): void {
     this.cloudStatus = {
       connected,
+      isNetworkOffline: connected ? false : isNetworkOffline,
       lastSyncedAtMs: connected ? Date.now() : this.cloudStatus.lastSyncedAtMs,
       lastError,
     };
@@ -924,6 +932,20 @@ export class StorageRepository {
     oldUsernameNormalized?: string,
     throwOnError = false
   ): Promise<void> {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      this.setCloudStatus(
+        false,
+        profile.settings?.language === 'en'
+          ? 'No internet connection'
+          : 'لا يوجد اتصال بالإنترنت',
+        true
+      );
+      if (throwOnError) {
+        throw new Error('network-request-failed');
+      }
+      return;
+    }
+
     try {
       const uid = auth.currentUser?.uid || profile.uid || (await ensureFirebaseAuthSession());
       if (!uid) {
@@ -947,7 +969,7 @@ export class StorageRepository {
           err,
           profile.settings?.language || 'ar'
         );
-        this.setCloudStatus(false, formatted);
+        this.setCloudStatus(false, formatted, isNetworkConnectivityError(err));
         handleFirestoreError(err, OperationType.GET, `players/${uid}`);
         if (throwOnError) throw err;
         return;
@@ -1159,13 +1181,13 @@ export class StorageRepository {
         reservedAtMs: nowMs,
       });
 
-      this.setCloudStatus(true, null);
+      this.setCloudStatus(true, null, false);
     } catch (error) {
       const formatted = formatFirebaseAuthOrFirestoreError(
         error,
         profile.settings?.language || 'ar'
       );
-      this.setCloudStatus(false, formatted);
+      this.setCloudStatus(false, formatted, isNetworkConnectivityError(error));
       handleFirestoreError(error, OperationType.WRITE, 'players/sync');
       if (throwOnError) {
         throw error;
@@ -1206,13 +1228,9 @@ export class StorageRepository {
     } catch (err) {
       // If reading usernames fails due to network or rules, surface if permission-denied or offline
       const errMsg = err instanceof Error ? err.message.toLowerCase() : '';
-      if (
-        errMsg.includes('offline') ||
-        errMsg.includes('unavailable') ||
-        errMsg.includes('network')
-      ) {
+      if (isNetworkConnectivityError(err)) {
         const formatted = formatFirebaseAuthOrFirestoreError(err, params.lang);
-        this.setCloudStatus(false, formatted);
+        this.setCloudStatus(false, formatted, true);
         return { ok: false, error: formatted };
       }
     }

@@ -48,6 +48,7 @@ import { FriendsAndChatView } from './components/FriendsAndChatView';
 import { CustomerSupportModal } from './components/CustomerSupportModal';
 import { FirebaseSecurityModal } from './components/FirebaseSecurityModal';
 import { ConnectionIndicator } from './components/ConnectionIndicator';
+import { OfflineBlockingOverlay } from './components/OfflineBlockingOverlay';
 import { InterstitialAdModal } from './components/AdModals';
 import {
   AppClosedScreen,
@@ -148,42 +149,125 @@ export default function App() {
   const [cloudStatus, setCloudStatus] = useState<CloudSyncStatus>(() =>
     storageRepo.getCloudStatus()
   );
+  const [isOnline, setIsOnline] = useState<boolean>(() =>
+    typeof navigator !== 'undefined' ? navigator.onLine !== false : true
+  );
+  const [isCheckingNetwork, setIsCheckingNetwork] = useState<boolean>(false);
+  const [retryFailedCount, setRetryFailedCount] = useState<number>(0);
 
-  // Subscribe to Cloud Connection Status and test Firestore connectivity
+  const verifyOnlineConnectivity = useCallback(
+    async (isManualRetry = false) => {
+      const browserNowOnline =
+        typeof navigator !== 'undefined' ? navigator.onLine !== false : true;
+
+      if (!browserNowOnline) {
+        setIsOnline(false);
+        if (isManualRetry) {
+          setRetryFailedCount((prev) => prev + 1);
+        }
+        storageRepo.setCloudStatus(
+          false,
+          lang === 'en' ? 'No internet connection' : 'لا يوجد اتصال بالإنترنت',
+          true
+        );
+        return false;
+      }
+
+      if (isManualRetry) {
+        setIsCheckingNetwork(true);
+      }
+
+      try {
+        const check = await testFirestoreConnection(6000);
+        if (check.connected) {
+          setIsOnline(true);
+          setRetryFailedCount(0);
+          storageRepo.setCloudStatus(true, null, false);
+          await ensureFirebaseAuthSession();
+          return true;
+        }
+
+        setIsOnline(false);
+        if (isManualRetry) {
+          setRetryFailedCount((prev) => prev + 1);
+        }
+        storageRepo.setCloudStatus(
+          false,
+          check.errorDetail ||
+            (lang === 'en' ? 'No internet connection' : 'لا يوجد اتصال بالإنترنت'),
+          true
+        );
+        return false;
+      } finally {
+        if (isManualRetry) {
+          setIsCheckingNetwork(false);
+        }
+      }
+    },
+    [lang]
+  );
+
+  // Real-time network & Firebase cloud monitoring (instant events + 15-second heartbeat)
   useEffect(() => {
     const unsubCloud = storageRepo.subscribeToCloudStatus((nextStatus) => {
       setCloudStatus(nextStatus);
+      if (nextStatus.isNetworkOffline) {
+        setIsOnline(false);
+      }
     });
 
-    void (async () => {
-      await ensureFirebaseAuthSession();
-      const check = await testFirestoreConnection();
-      storageRepo.setCloudStatus(check.connected, check.errorDetail || null);
-    })();
+    // Immediate connectivity check on app launch
+    void verifyOnlineConnectivity(false);
 
     const handleOnline = () => {
-      void (async () => {
-        const check = await testFirestoreConnection();
-        storageRepo.setCloudStatus(check.connected, check.errorDetail || null);
-      })();
+      void verifyOnlineConnectivity(false);
     };
+
     const handleOffline = () => {
+      setIsOnline(false);
       storageRepo.setCloudStatus(
         false,
-        lang === 'en'
-          ? 'No internet connection (Offline mode)'
-          : 'انقطع الاتصال بالإنترنت (وضع عدم الاتصال)'
+        lang === 'en' ? 'No internet connection' : 'لا يوجد اتصال بالإنترنت',
+        true
       );
+    };
+
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        void verifyOnlineConnectivity(false);
+      }
     };
 
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    const navWithConnection = navigator as Navigator & {
+      connection?: EventTarget;
+    };
+    const netConn = navWithConnection.connection;
+    if (netConn && typeof netConn.addEventListener === 'function') {
+      netConn.addEventListener('change', handleOnline);
+    }
+
+    // Periodic 15-second cloud reachability heartbeat
+    const heartbeatTimer = window.setInterval(() => {
+      if (!document.hidden) {
+        void verifyOnlineConnectivity(false);
+      }
+    }, 15000);
+
     return () => {
       unsubCloud();
+      window.clearInterval(heartbeatTimer);
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      if (netConn && typeof netConn.removeEventListener === 'function') {
+        netConn.removeEventListener('change', handleOnline);
+      }
     };
-  }, [lang]);
+  }, [lang, verifyOnlineConnectivity]);
 
   // Subscribe to real-time support tickets from Firestore for the current player
   useEffect(() => {
@@ -220,9 +304,9 @@ export default function App() {
     }
   }, [profile, lang]);
 
-  // Track active playtime every second to trigger the Hourly Interstitial Ad (every 3600s) for non-VIP players
+  // Track active playtime every second (only while genuinely online) to trigger Hourly Interstitial Ad for non-VIP players
   useEffect(() => {
-    if (showSplash || !profile || isAppClosed) return;
+    if (showSplash || !profile || isAppClosed || !isOnline) return;
 
     const timer = window.setInterval(() => {
       setProfile((prev) => {
@@ -235,7 +319,6 @@ export default function App() {
           setInterstitialAdPending(true);
         }
 
-        // Persist playtime to localStorage every 10 seconds to avoid excessive writes
         const updated: PlayerProfile = {
           ...prev,
           activePlaySeconds: nextSeconds,
@@ -248,7 +331,7 @@ export default function App() {
     }, 1000);
 
     return () => window.clearInterval(timer);
-  }, [showSplash, Boolean(profile), isAppClosed]);
+  }, [showSplash, Boolean(profile), isAppClosed, isOnline]);
 
   // Intercept Hardware Back Button on the Home Screen to show Exit Game confirmation modal
   useEffect(() => {
@@ -303,6 +386,10 @@ export default function App() {
   };
 
   const handleSelectCategoryCard = (category: CategoryInfo) => {
+    if (!isOnline) {
+      void verifyOnlineConnectivity(true);
+      return;
+    }
     soundEngine.playClick();
     setPressedCategoryId(category.id);
     window.setTimeout(() => {
@@ -513,6 +600,12 @@ export default function App() {
     setProfile(updated);
   };
 
+  const handlePurchaseCoinPack = (coinAmount: number) => {
+    if (!profile) return;
+    const updated = storageRepo.purchaseCoinPack(profile, coinAmount);
+    setProfile(updated);
+  };
+
   const handlePurchaseVipIap = (params: {
     tier: Exclude<VipTier, 'none'>;
     productId: string;
@@ -636,21 +729,47 @@ export default function App() {
     setProfile(nextProfile);
   };
 
+  const isImmersiveGameplay = Boolean(activeMatchCategory) || openModal === 'boss';
+
+  const offlineOverlayNode = !isOnline ? (
+    <OfflineBlockingOverlay
+      lang={lang}
+      isChecking={isCheckingNetwork}
+      isMidMatch={isImmersiveGameplay}
+      retryFailedCount={retryFailedCount}
+      onRetry={() => {
+        void verifyOnlineConnectivity(true).then((connected) => {
+          if (connected && profile) {
+            void storageRepo.syncProfileToFirestore(profile);
+          }
+        });
+      }}
+    />
+  ) : null;
+
   if (isAppClosed) {
-    return <AppClosedScreen lang={lang} onRelaunch={() => setIsAppClosed(false)} />;
+    return (
+      <>
+        <AppClosedScreen lang={lang} onRelaunch={() => setIsAppClosed(false)} />
+        {offlineOverlayNode}
+      </>
+    );
   }
 
   if (showSplash || !profile) {
     return (
-      <SplashAndOnboarding
-        hasExistingProfile={Boolean(profile)}
-        initialMode={authInitialMode}
-        lang={lang}
-        cloudStatus={cloudStatus}
-        onToggleLanguage={handleToggleLanguage}
-        onSplashComplete={() => setShowSplash(false)}
-        onAuthSuccess={handleAuthSuccess}
-      />
+      <>
+        <SplashAndOnboarding
+          hasExistingProfile={Boolean(profile)}
+          initialMode={authInitialMode}
+          lang={lang}
+          cloudStatus={cloudStatus}
+          onToggleLanguage={handleToggleLanguage}
+          onSplashComplete={() => setShowSplash(false)}
+          onAuthSuccess={handleAuthSuccess}
+        />
+        {offlineOverlayNode}
+      </>
     );
   }
 
@@ -674,6 +793,51 @@ export default function App() {
   const leaderboardList = storageRepo.getLeaderboardWithUser(profile);
   const userIdx = leaderboardList.findIndex((entry) => entry.isCurrentUser);
   const currentMonthlyRank = userIdx >= 0 ? userIdx + 1 : 1;
+
+  // FULL-SCREEN IMMERSIVE GAMEPLAY MODE: Hide header, tabs, banners, and footer completely
+  if (isImmersiveGameplay) {
+    return (
+      <div className="min-h-[100dvh] bg-[#080C16] text-slate-100">
+        {activeMatchCategory ? (
+          <ArenaMatchView
+            category={activeMatchCategory}
+            profile={profile}
+            lang={lang}
+            isPausedByNetwork={!isOnline}
+            onConsumeLifeline={handleConsumeLifeline}
+            onAwardInstantComboBonus={handleAwardInstantComboBonus}
+            onRoundCompleteSync={handleRoundCompleteSync}
+            onCompleteMatch={handleCompleteMatch}
+            onRoundCompleteAdCheck={handleRoundCompleteAdCheck}
+            onExitArena={() => setActiveMatchCategory(null)}
+          />
+        ) : openModal === 'boss' ? (
+          <DailyBossModal
+            profile={profile}
+            lang={lang}
+            isPausedByNetwork={!isOnline}
+            onClose={() => setOpenModal(null)}
+            onFinishDailyBoss={handleFinishDailyBoss}
+          />
+        ) : null}
+
+        {showHourlyInterstitialAd && (
+          <InterstitialAdModal
+            lang={lang}
+            onCloseAd={() => setShowHourlyInterstitialAd(false)}
+            onUpgradeVipClick={() => {
+              setShowHourlyInterstitialAd(false);
+              setActiveMatchCategory(null);
+              setOpenModal(null);
+              setActiveTab('store');
+            }}
+          />
+        )}
+
+        {offlineOverlayNode}
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#080C16] text-slate-100 flex flex-col">
@@ -836,6 +1000,10 @@ export default function App() {
           <button
             type="button"
             onClick={() => {
+              if (!isOnline) {
+                void verifyOnlineConnectivity(true);
+                return;
+              }
               soundEngine.playClick();
               setActiveMatchCategory(cocktailCategory);
             }}
@@ -846,8 +1014,8 @@ export default function App() {
         </div>
       </header>
 
-      {/* Clear Cloud Error Diagnostic Banner if Firestore Sync Encountered an Issue */}
-      {cloudStatus.lastError && (
+      {/* Clear Cloud Error Diagnostic Banner if Firestore Sync Encountered an Issue (non-network rules issue) */}
+      {cloudStatus.lastError && !cloudStatus.isNetworkOffline && (
         <div className="bg-rose-950/80 border-b border-rose-500/40 px-4 py-2.5">
           <div className="max-w-7xl mx-auto flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-rose-200">
             <div className="flex items-start sm:items-center gap-2">
@@ -955,19 +1123,7 @@ export default function App() {
 
       {/* Main Content Container */}
       <main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 md:py-8">
-        {activeMatchCategory ? (
-          <ArenaMatchView
-            category={activeMatchCategory}
-            profile={profile}
-            lang={lang}
-            onConsumeLifeline={handleConsumeLifeline}
-            onAwardInstantComboBonus={handleAwardInstantComboBonus}
-            onRoundCompleteSync={handleRoundCompleteSync}
-            onCompleteMatch={handleCompleteMatch}
-            onRoundCompleteAdCheck={handleRoundCompleteAdCheck}
-            onExitArena={() => setActiveMatchCategory(null)}
-          />
-        ) : activeTab === 'friends' ? (
+        {activeTab === 'friends' ? (
           <FriendsAndChatView
             profile={profile}
             lang={lang}
@@ -984,6 +1140,7 @@ export default function App() {
             lang={lang}
             onBuyLifeline={handleBuyLifeline}
             onClaimRewardedAd={handleClaimRewardedAd}
+            onPurchaseCoinPack={handlePurchaseCoinPack}
             onPurchaseVipIap={handlePurchaseVipIap}
           />
         ) : activeTab === 'profile' ? (
@@ -1450,14 +1607,6 @@ export default function App() {
           onClaimSpinReward={handleClaimSpinReward}
         />
       )}
-      {openModal === 'boss' && (
-        <DailyBossModal
-          profile={profile}
-          lang={lang}
-          onClose={() => setOpenModal(null)}
-          onFinishDailyBoss={handleFinishDailyBoss}
-        />
-      )}
       {openModal === 'missions' && (
         <DailyMissionsModal
           profile={profile}
@@ -1518,6 +1667,8 @@ export default function App() {
           }}
         />
       )}
+
+      {offlineOverlayNode}
     </div>
   );
 }

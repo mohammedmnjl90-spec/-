@@ -40,8 +40,9 @@ export const ConnectionIndicator: React.FC<ConnectionIndicatorProps> = ({
       storageRepo.setCloudStatus(
         false,
         lang === 'en'
-          ? 'Browser is offline — changes are saved locally until connection returns.'
-          : 'المتصفح غير متصل بالإنترنت — يتم الحفظ محلياً حتى يعود الاتصال.'
+          ? 'No internet connection — Peak of Challenge requires an active connection.'
+          : 'لا يوجد اتصال بالإنترنت — تتطلب لعبة قمة التحدي اتصالاً دائماً بالإنترنت.',
+        true
       );
       onStatusChange?.(false);
       return;
@@ -50,7 +51,11 @@ export const ConnectionIndicator: React.FC<ConnectionIndicatorProps> = ({
     setIsVerifying(true);
     try {
       const result = await testFirestoreConnection();
-      storageRepo.setCloudStatus(result.connected, result.errorDetail || null);
+      storageRepo.setCloudStatus(
+        result.connected,
+        result.errorDetail || null,
+        Boolean(result.isNetworkError)
+      );
       onStatusChange?.(result.connected);
     } finally {
       setIsVerifying(false);
@@ -78,8 +83,9 @@ export const ConnectionIndicator: React.FC<ConnectionIndicatorProps> = ({
       storageRepo.setCloudStatus(
         false,
         lang === 'en'
-          ? 'Network disconnected (Offline)'
-          : 'انقطع الاتصال بالشبكة (غير متصل)'
+          ? 'No internet connection'
+          : 'لا يوجد اتصال بالإنترنت',
+        true
       );
       onStatusChange?.(false);
     };
