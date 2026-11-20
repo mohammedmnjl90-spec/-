@@ -690,6 +690,17 @@ export class StorageRepository {
       parsed.adsRemoved = parsed.vipTier !== 'none';
     }
 
+    if (parsed.vipExpiryDate) {
+      const expiryMs = new Date(parsed.vipExpiryDate).getTime();
+      if (Number.isNaN(expiryMs) || Date.now() > expiryMs) {
+        parsed.vipTier = 'none';
+        parsed.vipExpiryDate = undefined;
+        parsed.adsRemoved = false;
+      }
+    } else if (parsed.vipTier !== 'none' && !parsed.vipExpiryDate) {
+      parsed.vipExpiryDate = new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString();
+    }
+
     if (!parsed.vipReceipts) {
       parsed.vipReceipts = [];
     }
@@ -2230,10 +2241,15 @@ export class StorageRepository {
 
     const safeBonusCoins = antiCheatGuard.clampCoinsDelta(params.bonusCoins, true);
 
+    const currentExpiryMs = profile.vipExpiryDate ? new Date(profile.vipExpiryDate).getTime() : 0;
+    const baseTimeMs = Math.max(Date.now(), currentExpiryMs);
+    const newExpiryIso = new Date(baseTimeMs + 30 * 24 * 3600 * 1000).toISOString();
+
     const nextProfile: PlayerProfile = {
       ...profile,
       vipTier: params.tier,
-      adsRemoved: true, // Permanently removes all ads including hourly ads
+      vipExpiryDate: newExpiryIso,
+      adsRemoved: true,
       coins: profile.coins + safeBonusCoins,
       lifelines: {
         fiftyFifty: profile.lifelines.fiftyFifty + params.bonusLifelinesEach,
@@ -2243,9 +2259,19 @@ export class StorageRepository {
       vipReceipts: [receipt, ...(profile.vipReceipts || [])],
     };
 
-    // Note: Cloud Firestore upgrade of vipTier/adsRemoved/coins is performed by the Server / Cloud Function
-    // (`verifyVipPurchaseReceipt` on `/vip_verifications/{receiptId}`), so we skip direct client overwrite here.
     return this.saveProfile(nextProfile, { skipCloudSync: true });
+  }
+
+  public purchaseCoinPack(
+    profile: PlayerProfile,
+    coinAmount: number
+  ): PlayerProfile {
+    const safeCoins = antiCheatGuard.clampCoinsDelta(coinAmount, true);
+    const nextProfile: PlayerProfile = {
+      ...profile,
+      coins: profile.coins + safeCoins,
+    };
+    return this.saveProfile(nextProfile);
   }
 
   public createSupportTicket(

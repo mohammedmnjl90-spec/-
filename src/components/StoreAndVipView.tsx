@@ -36,6 +36,7 @@ interface StoreAndVipViewProps {
     quantity: number
   ) => void;
   onClaimRewardedAd: () => void;
+  onPurchaseCoinPack: (coinAmount: number, priceDisplay: string) => void;
   onPurchaseVipIap: (params: {
     tier: Exclude<VipTier, 'none'>;
     productId: string;
@@ -46,6 +47,40 @@ interface StoreAndVipViewProps {
     verifiedReceipt?: VipPurchaseReceipt;
   }) => void;
 }
+
+interface CoinRechargeProduct {
+  id: string;
+  coinAmount: number;
+  priceDisplay: string;
+  titleAr: string;
+  titleEn: string;
+  popular?: boolean;
+}
+
+const COIN_RECHARGE_PACKS: CoinRechargeProduct[] = [
+  {
+    id: 'pack_coins_250',
+    coinAmount: 250,
+    priceDisplay: '$0.99',
+    titleAr: 'حزمة 250 عملة ذهبية',
+    titleEn: '250 Gold Coins Pack',
+  },
+  {
+    id: 'pack_coins_700',
+    coinAmount: 700,
+    priceDisplay: '$2.49',
+    titleAr: 'حزمة 700 عملة (الأكثر طلباً)',
+    titleEn: '700 Coins Pack (Most Popular)',
+    popular: true,
+  },
+  {
+    id: 'pack_coins_1800',
+    coinAmount: 1800,
+    priceDisplay: '$4.99',
+    titleAr: 'حزمة 1800 عملة (قوة ملكية)',
+    titleEn: '1800 Coins Pack (Royal Power)',
+  },
+];
 
 interface LifelineProduct {
   id: string;
@@ -231,10 +266,30 @@ export const StoreAndVipView: React.FC<StoreAndVipViewProps> = ({
   lang,
   onBuyLifeline,
   onClaimRewardedAd,
+  onPurchaseCoinPack,
   onPurchaseVipIap,
 }) => {
   const [feedbackBanner, setFeedbackBanner] = useState<string | null>(null);
   const [isRewardedAdModalOpen, setIsRewardedAdModalOpen] = useState(false);
+
+  const getVipRemainingDays = (expiryDateIso?: string): number => {
+    if (!expiryDateIso) return 0;
+    const diffMs = new Date(expiryDateIso).getTime() - Date.now();
+    if (diffMs <= 0) return 0;
+    return Math.ceil(diffMs / (24 * 3600 * 1000));
+  };
+
+  const handleBuyCoinPack = (pack: CoinRechargeProduct) => {
+    soundEngine.playReward();
+    onPurchaseCoinPack(pack.coinAmount, pack.priceDisplay);
+    showToast(
+      tr(
+        lang,
+        `تم شحن حزمة ${pack.coinAmount} عملة ذهبية بنجاح إلى رصيدك!`,
+        `Successfully recharged ${pack.coinAmount} gold coins pack to your balance!`
+      )
+    );
+  };
 
   // Real IAP Checkout Modal State
   const [selectedVipPkg, setSelectedVipPkg] = useState<VipIapPackageCard | null>(null);
@@ -478,7 +533,64 @@ export const StoreAndVipView: React.FC<StoreAndVipViewProps> = ({
         </div>
       </div>
 
-      {/* Section 2: VIP Packages (In-App Purchases Ready — Google Play Billing / Apple App Store IAP) */}
+      {/* Section: Independent Gold Coin Recharge Packs (Unlimited Purchases) */}
+      <div className="space-y-4">
+        <div className="flex items-center gap-2">
+          <Coins className="w-5 h-5 text-amber-400" />
+          <h3 className="text-xl font-extrabold text-white">
+            {tr(lang, 'شحن العملات الذهبية (بلا حدود)', 'Gold Coin Recharge Packs (Unlimited)')}
+          </h3>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {COIN_RECHARGE_PACKS.map((pack) => {
+            const packTitle = tr(lang, pack.titleAr, pack.titleEn);
+            return (
+              <div
+                key={pack.id}
+                className={`p-5 rounded-2xl border flex flex-col justify-between gap-4 ${
+                  pack.popular
+                    ? 'border-amber-400/60 bg-gradient-to-b from-amber-500/15 to-[#111827]'
+                    : 'border-slate-800 bg-[#111827]'
+                }`}
+              >
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-black text-amber-400 flex items-center gap-1.5 font-mono-num">
+                      <Coins className="w-4 h-4" />
+                      <span>+{pack.coinAmount} {tr(lang, 'عملة', 'Coins')}</span>
+                    </span>
+                    {pack.popular && (
+                      <span className="text-[10px] font-extrabold bg-amber-400 text-slate-950 px-2 py-0.5 rounded-full">
+                        {tr(lang, 'الأكثر طلباً', 'Most Popular')}
+                      </span>
+                    )}
+                  </div>
+                  <h4 className="text-base font-extrabold text-white">{packTitle}</h4>
+                  <p className="text-xs text-slate-400">
+                    {tr(lang, 'إضافة فورية لرصيدك بدون أي قيود على عدد مرات الشراء.', 'Instant add to your balance with no purchase limits.')}
+                  </p>
+                </div>
+
+                <div className="flex items-center justify-between pt-3 border-t border-slate-800/80">
+                  <span className="text-lg font-black text-amber-400 font-mono-num">
+                    {pack.priceDisplay}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleBuyCoinPack(pack)}
+                    className="px-4 py-2.5 rounded-xl bg-gradient-to-l from-amber-400 to-yellow-500 hover:from-amber-300 hover:to-yellow-400 text-slate-950 font-extrabold text-xs transition-colors cursor-pointer whitespace-nowrap shadow-md shadow-amber-500/15"
+                  >
+                    {tr(lang, `شراء (${pack.priceDisplay})`, `Buy (${pack.priceDisplay})`)}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Section 2: VIP Monthly Subscriptions (30 Days + Renewal & Upgrade) */}
       <div className="space-y-4">
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-2">
@@ -486,8 +598,8 @@ export const StoreAndVipView: React.FC<StoreAndVipViewProps> = ({
             <h3 className="text-xl font-extrabold text-white">
               {tr(
                 lang,
-                'باقات VIP الرسمية (إزالة الإعلانات + مكافآت فورية)',
-                'Official VIP Packages (Remove All Ads + Instant Perks)'
+                'اشتراكات VIP الشهرية (30 يوماً + إزالة الإعلانات)',
+                'Monthly VIP Subscriptions (30 Days + Remove All Ads)'
               )}
             </h3>
           </div>
@@ -499,8 +611,8 @@ export const StoreAndVipView: React.FC<StoreAndVipViewProps> = ({
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
           {VIP_IAP_PACKAGES.map((pkg) => {
-            const isCurrentOrLower = tierRank[profile.vipTier] >= tierRank[pkg.tier];
             const isExactCurrent = profile.vipTier === pkg.tier;
+            const remainingDays = isExactCurrent ? getVipRemainingDays(profile.vipExpiryDate) : 0;
             const pkgName = tr(lang, pkg.nameAr, pkg.nameEn);
             const pkgSub = tr(lang, pkg.subtitleAr, pkg.subtitleEn);
             const perks = lang === 'en' ? pkg.perksEn : pkg.perksAr;
@@ -513,7 +625,7 @@ export const StoreAndVipView: React.FC<StoreAndVipViewProps> = ({
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
                     <span className={`text-xs font-extrabold ${pkg.badgeColor}`}>
-                      {tr(lang, 'اشتراك VIP رسمي', 'Official VIP Tier')}
+                      {tr(lang, 'اشتراك شهري (30 يوماً)', 'Monthly Subscription (30 Days)')}
                     </span>
                     <Crown className={`w-6 h-6 ${pkg.badgeColor}`} />
                   </div>
@@ -521,6 +633,11 @@ export const StoreAndVipView: React.FC<StoreAndVipViewProps> = ({
                   <div>
                     <h4 className="text-xl font-black text-white">{pkgName}</h4>
                     <p className="text-xs text-slate-400 mt-1">{pkgSub}</p>
+                    {isExactCurrent && remainingDays > 0 && (
+                      <div className="mt-2 inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-amber-500/20 border border-amber-400/40 text-amber-300 text-xs font-extrabold">
+                        <span>⏳ {tr(lang, `متبقي على الاشتراك: ${remainingDays} يوماً`, `${remainingDays} days remaining`)}</span>
+                      </div>
+                    )}
                   </div>
 
                   <ul className="space-y-2.5 text-xs text-slate-200 pt-2">
@@ -536,38 +653,42 @@ export const StoreAndVipView: React.FC<StoreAndVipViewProps> = ({
                 <div className="space-y-3 pt-4 border-t border-slate-800/80">
                   <div className="flex items-center justify-between">
                     <span className="text-xs text-slate-400">
-                      {tr(lang, 'سعر الباقة:', 'Package Price:')}
+                      {tr(lang, 'سعر الاشتراك/التجديد:', 'Subscription Price:')}
                     </span>
                     <span className="text-xl font-black text-amber-400 font-mono-num">
                       {pkg.priceDisplay}
                     </span>
                   </div>
 
-                  {isCurrentOrLower ? (
-                    <div className="w-full py-3 rounded-xl bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 font-extrabold text-xs text-center">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      soundEngine.playClick();
+                      setSelectedVipPkg(pkg);
+                    }}
+                    className="w-full py-3.5 px-4 rounded-xl bg-gradient-to-l from-amber-400 to-yellow-500 hover:from-amber-300 hover:to-yellow-400 text-slate-950 font-black text-xs cursor-pointer transition-all whitespace-nowrap flex items-center justify-center gap-2 shadow-md shadow-amber-500/15"
+                  >
+                    <CreditCard className="w-4 h-4" />
+                    <span>
                       {isExactCurrent
-                        ? tr(lang, 'باقتك المفعّلة حالياً ✓', 'Currently Active VIP ✓')
-                        : tr(lang, 'لديك باقة VIP أعلى مفعّلة ✓', 'Higher VIP Tier Active ✓')}
-                    </div>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        soundEngine.playClick();
-                        setSelectedVipPkg(pkg);
-                      }}
-                      className="w-full py-3.5 px-4 rounded-xl bg-gradient-to-l from-amber-400 to-yellow-500 hover:from-amber-300 hover:to-yellow-400 text-slate-950 font-black text-xs cursor-pointer transition-all whitespace-nowrap flex items-center justify-center gap-2 shadow-md shadow-amber-500/15"
-                    >
-                      <CreditCard className="w-4 h-4" />
-                      <span>
-                        {tr(
-                          lang,
-                          `شراء وتفعيل (${pkg.priceDisplay})`,
-                          `Purchase & Activate (${pkg.priceDisplay})`
-                        )}
-                      </span>
-                    </button>
-                  )}
+                        ? tr(
+                            lang,
+                            `تجديد وتمديد 30 يوماً إضافية (${pkg.priceDisplay})`,
+                            `Renew & Extend +30 Days (${pkg.priceDisplay})`
+                          )
+                        : tierRank[profile.vipTier] > tierRank[pkg.tier]
+                        ? tr(
+                            lang,
+                            `التحويل إلى الباقة (${pkg.priceDisplay})`,
+                            `Switch to Package (${pkg.priceDisplay})`
+                          )
+                        : tr(
+                            lang,
+                            `شراء وتفعيل الاشتراك (${pkg.priceDisplay})`,
+                            `Subscribe & Activate (${pkg.priceDisplay})`
+                          )}
+                    </span>
+                  </button>
                 </div>
               </div>
             );

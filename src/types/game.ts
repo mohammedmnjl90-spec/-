@@ -170,6 +170,7 @@ export interface PlayerProfile {
   coins: number;
   xp: number;
   vipTier: VipTier;
+  vipExpiryDate?: string; // ISO expiry date for 30-day VIP subscription
   adsRemoved: boolean; // True when subscribed to VIP
   vipReceipts: VipPurchaseReceipt[];
   fairPlayScore?: number; // Anti-Cheat integrity score (0..100, starts at 100)
