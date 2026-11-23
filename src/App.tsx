@@ -24,6 +24,7 @@ import {
   CloudSyncStatus,
   getVipMultiplier,
   isAdminProfile,
+  normalizeUsernameKey,
   storageRepo,
 } from './services/storageRepository';
 import { soundEngine } from './utils/sound';
@@ -646,7 +647,7 @@ export default function App() {
           activePlaySeconds: nextSeconds,
         };
         if (nextSeconds % 10 === 0) {
-          storageRepo.saveProfile(updated);
+          storageRepo.saveProfile(updated, { skipCloudSync: true });
         }
         return updated;
       });
@@ -819,14 +820,19 @@ export default function App() {
     maxComboInMatch: number;
     combosTriggeredCount: number;
     playedQuestionIds: string[];
+    alreadySyncedRoundsInMatch?: boolean;
   }) => {
-    if (!profile || !activeMatchCategory) return;
-    const nextProfile = storageRepo.recordMatchCompletion(profile, {
-      categoryId: activeMatchCategory.id,
-      categoryName: getCategoryName(activeMatchCategory, lang),
-      ...result,
+    if (!activeMatchCategory) return;
+    const categoryId = activeMatchCategory.id;
+    const categoryName = getCategoryName(activeMatchCategory, lang);
+    setProfile((prev) => {
+      if (!prev) return prev;
+      return storageRepo.recordMatchCompletion(prev, {
+        categoryId,
+        categoryName,
+        ...result,
+      });
     });
-    setProfile(nextProfile);
   };
 
   const handleClaimSpinReward = (segment: SpinSegment, isPaidExtraSpin: boolean) => {
@@ -995,16 +1001,22 @@ export default function App() {
 
   const handleUpdateIdentity = (newUsername: string, newCountry: CountryInfo) => {
     if (!profile) return;
+    const oldNorm = normalizeUsernameKey(profile.username);
     const nowIso = new Date().toISOString();
     const updated: PlayerProfile = {
       ...profile,
       username: newUsername,
-      usernameNormalized: newUsername.trim().toLowerCase(),
+      usernameNormalized: normalizeUsernameKey(newUsername),
       country: newCountry,
       lastIdentityChangeAt: nowIso,
       lastProfileEditAt: Date.now(),
     };
-    setProfile(storageRepo.saveProfile(updated));
+    setProfile(
+      storageRepo.saveProfile(updated, {
+        oldUsernameNormalized: oldNorm,
+        isIdentityEdit: true,
+      })
+    );
   };
 
   const handleUpdateSettings = (
@@ -1337,13 +1349,19 @@ export default function App() {
         </div>
       </header>
 
-      {/* Clear Cloud Error Diagnostic Banner if Firestore Sync Encountered an Issue (non-network rules issue) */}
+      {/* Calm, non-technical sync notice (never displays technical error codes or scary red alerts to players) */}
       {cloudStatus.lastError && !cloudStatus.isNetworkOffline && (
-        <div className="bg-rose-950/80 border-b border-rose-500/40 px-4 py-2.5">
-          <div className="max-w-7xl mx-auto flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-rose-200">
+        <div className="bg-amber-950/50 border-b border-amber-500/30 px-4 py-2.5">
+          <div className="max-w-7xl mx-auto flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-amber-100">
             <div className="flex items-start sm:items-center gap-2">
-              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5 sm:mt-0" />
-              <span>{cloudStatus.lastError}</span>
+              <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5 sm:mt-0" />
+              <span>
+                {tr(
+                  lang,
+                  'جارٍ حفظ ومزامنة تقدمك تلقائياً... يمكنك متابعة اللعب بأمان.',
+                  'Saving and syncing your progress automatically... You can keep playing safely.'
+                )}
+              </span>
             </div>
             <div className="flex items-center gap-2 shrink-0">
               {isAdmin && (
@@ -1353,9 +1371,9 @@ export default function App() {
                     soundEngine.playClick();
                     setOpenModal('firebase_security');
                   }}
-                  className="px-3 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 border border-rose-400/40 text-rose-100 font-bold cursor-pointer whitespace-nowrap"
+                  className="px-3 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/40 text-amber-100 font-bold cursor-pointer whitespace-nowrap"
                 >
-                  {tr(lang, 'عرض قواعد الحماية', 'View Rules')}
+                  {tr(lang, 'لوحة الإدارة', 'Admin Panel')}
                 </button>
               )}
               <button
@@ -1368,7 +1386,7 @@ export default function App() {
                 }}
                 className="px-3 py-1 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-extrabold cursor-pointer whitespace-nowrap"
               >
-                {tr(lang, 'إعادة المحاولة', 'Retry Sync')}
+                {tr(lang, 'إعادة المحاولة', 'Retry')}
               </button>
             </div>
           </div>

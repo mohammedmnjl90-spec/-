@@ -5,6 +5,7 @@ import { CloudSyncStatus, storageRepo } from '../services/storageRepository';
 import { phoneToSyntheticEmail } from '../firebaseConfig';
 import { soundEngine } from '../utils/sound';
 import { getCountryDisplayName, tr } from '../utils/i18n';
+import { globalErrorHandler } from '../utils/globalErrorHandler';
 import {
   AlertCircle,
   CheckCircle2,
@@ -192,8 +193,8 @@ export function validateAndTransformPhoneForAuth(
       previewSyntheticEmail: syntheticEmail,
       error: tr(
         lang,
-        'رقم الجوال لا يطابق الصيغة الدولية القياسية (E.164) المطلوبة للتحويل إلى phone_xxx@neurox.app.',
-        'Phone number does not match standard E.164 international format required for phone_xxx@neurox.app.'
+        'يرجى التأكد من إدخال رقم جوال صحيح مع مفتاح الدولة.',
+        'Please make sure to enter a valid mobile number with country code.'
       ),
     };
   }
@@ -422,11 +423,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       setIsRegistering(false);
       onAuthSuccess(result.profile);
     } catch (err) {
-      setErrorMsg(
-        err instanceof Error
-          ? err.message
-          : tr(lang, 'حدث خطأ أثناء الاتصال بالسحابة.', 'Cloud connection error occurred.')
-      );
+      const { userMessage } = globalErrorHandler.recordAndFormat({
+        error: err,
+        category: 'auth',
+        operation: 'register_submit',
+        path: 'auth/register',
+        lang,
+      });
+      setErrorMsg(userMessage);
       soundEngine.playWrong();
       setIsRegistering(false);
     }
@@ -495,11 +499,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       setIsLoggingIn(false);
       onAuthSuccess(result.profile);
     } catch (err) {
-      setLoginError(
-        err instanceof Error
-          ? err.message
-          : tr(lang, 'تعذر تسجيل الدخول عبر السحابة.', 'Could not sign in via cloud.')
-      );
+      const { userMessage } = globalErrorHandler.recordAndFormat({
+        error: err,
+        category: 'auth',
+        operation: 'login_submit',
+        path: 'auth/login',
+        lang,
+      });
+      setLoginError(userMessage);
       soundEngine.playWrong();
       setIsLoggingIn(false);
     }
@@ -554,21 +561,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
     if (validation.valid) {
       return (
-        <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 text-[11px] text-emerald-300">
-          <div className="flex items-center gap-1.5 font-bold">
-            <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-            <span>
-              {tr(lang, 'صيغة دولية صحيحة:', 'Valid Int’l Format:')}{' '}
-              <strong className="font-mono-num text-white" dir="ltr">
-                {validation.normalizedPhone}
-              </strong>
-            </span>
-          </div>
-          <span
-            className="text-[10px] font-mono-num text-emerald-400/90 bg-[#0B1120] px-2 py-0.5 rounded border border-emerald-500/20 truncate"
-            dir="ltr"
-          >
-            {validation.syntheticEmail}
+        <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center gap-1.5 text-[11px] text-emerald-300 font-bold">
+          <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+          <span>
+            {tr(lang, 'رقم الجوال صحيح:', 'Valid mobile number:')}{' '}
+            <strong className="font-mono-num text-white" dir="ltr">
+              {validation.normalizedPhone}
+            </strong>
           </span>
         </div>
       );
@@ -593,7 +592,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         <div className="p-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center gap-1.5 text-[11px] text-emerald-300 font-bold">
           <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
           <span>
-            {tr(lang, 'البريد الإلكتروني جاهز للمصادقة:', 'Email ready for auth:')}{' '}
+            {tr(lang, 'البريد الإلكتروني صحيح:', 'Valid email address:')}{' '}
             <span className="font-mono-num text-white">{validation.normalizedEmail}</span>
           </span>
         </div>
@@ -689,8 +688,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             <p className="text-xs text-slate-400 leading-relaxed">
               {tr(
                 lang,
-                'أدخل البريد الإلكتروني المرتبط بحسابك وسنرسل لك رابطاً فورياً لإعادة تعيين كلمة المرور عبر Firebase Auth.',
-                'Enter the email address linked to your account and we will send an instant password reset link via Firebase Auth.'
+                'أدخل البريد الإلكتروني المرتبط بحسابك وسنرسل لك رابطاً فورياً لإعادة تعيين كلمة المرور.',
+                'Enter the email address linked to your account and we will send you an instant password reset link.'
               )}
             </p>
           </div>
@@ -995,7 +994,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
                   <span>
-                    {tr(lang, 'جاري التحقق وتسجيل الدخول...', 'Signing in to Cloud...')}
+                    {tr(lang, 'جارٍ التحقق وتسجيل الدخول...', 'Signing in...')}
                   </span>
                 </>
               ) : (
@@ -1055,8 +1054,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             <p className="text-xs text-slate-400">
               {tr(
                 lang,
-                'أنشئ حسابك السحابي لحفظ نقاطك ومنافسة الأوائل في قائمة المتصدرين الشهرية.',
-                'Create your cloud account to save your score and compete on the monthly leaderboard.'
+                'أنشئ حسابك لحفظ نقاطك ومنافسة الأوائل في قائمة المتصدرين الشهرية.',
+                'Create your account to save your score and compete on the monthly leaderboard.'
               )}
             </p>
           </div>
@@ -1300,11 +1299,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 <>
                   <Loader2 className="w-5 h-5 animate-spin" />
                   <span>
-                    {tr(
-                      lang,
-                      'جاري إنشاء الحساب وحفظه في السحابة...',
-                      'Creating account & saving to Cloud...'
-                    )}
+                    {tr(lang, 'جارٍ إنشاء حسابك...', 'Creating your account...')}
                   </span>
                 </>
               ) : (

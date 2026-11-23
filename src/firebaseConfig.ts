@@ -17,6 +17,7 @@ import {
   memoryLocalCache,
   Firestore,
 } from 'firebase/firestore';
+import { ErrorCategory, globalErrorHandler } from './utils/globalErrorHandler';
 
 /**
  * مفاتيح الربط الحقيقية لمشروع Firebase: waled-alsh
@@ -113,96 +114,28 @@ export function phoneToSyntheticEmail(
 }
 
 /**
- * Translates Firebase Auth & Cloud Firestore error codes into clear, actionable
- * user-facing messages in Arabic or English explaining the exact cause.
+ * Translates Firebase Auth & Cloud Firestore error codes into clear, calm,
+ * non-technical user-facing messages while recording full diagnostics for developers.
  */
 export function formatFirebaseAuthOrFirestoreError(
   error: unknown,
-  lang: 'ar' | 'en'
+  lang: 'ar' | 'en',
+  category: ErrorCategory = 'unknown'
 ): string {
-  const rawMessage = error instanceof Error ? error.message : String(error || '');
-  const code =
-    typeof error === 'object' && error !== null && 'code' in error
-      ? String((error as { code?: unknown }).code || '')
-      : '';
-  const combined = `${code} ${rawMessage}`.toLowerCase();
-
-  if (combined.includes('auth/email-already-in-use')) {
-    return lang === 'en'
-      ? 'This email or mobile number is already registered in the cloud. Please switch to "Login" and sign in with your password.'
-      : 'البريد الإلكتروني أو رقم الجوال مسجل بالفعل في السحابة. يرجى الانتقال إلى تبويب "تسجيل الدخول" والدخول بكلمة المرور.';
-  }
-
-  if (
-    combined.includes('auth/invalid-credential') ||
-    combined.includes('auth/wrong-password') ||
-    combined.includes('auth/user-not-found')
-  ) {
-    return lang === 'en'
-      ? 'Incorrect email/phone number or password. Please verify your credentials and try again.'
-      : 'البريد الإلكتروني / رقم الجوال أو كلمة المرور غير صحيحة. يرجى التأكد من البيانات والمحاولة مرة أخرى.';
-  }
-
-  if (combined.includes('auth/weak-password')) {
-    return lang === 'en'
-      ? 'Password is too weak. Please enter at least 6 characters.'
-      : 'كلمة المرور ضعيفة؛ يرجى إدخال 6 أحرف أو أرقام على الأقل.';
-  }
-
-  if (combined.includes('auth/invalid-email')) {
-    return lang === 'en'
-      ? 'Invalid email format. Please enter a valid email address.'
-      : 'صيغة البريد الإلكتروني غير صحيحة، يرجى التحقق منها.';
-  }
-
-  if (
-    combined.includes('auth/operation-not-allowed') ||
-    combined.includes('configuration-not-found')
-  ) {
-    return lang === 'en'
-      ? 'Email/Password Sign-In is not enabled yet in your Firebase project (waled-alsh). Please enable "Email/Password" in Firebase Console > Authentication > Sign-in method.'
-      : 'طريقة الدخول بالبريد وكلمة المرور (Email/Password) غير مفعلة بعد في مشروع Firebase (waled-alsh). يرجى تفعيل خيار Email/Password من Firebase Console > Authentication > Sign-in method.';
-  }
-
-  if (combined.includes('auth/too-many-requests')) {
-    return lang === 'en'
-      ? 'Too many failed attempts. Please wait a moment before trying again.'
-      : 'تم تجاوز عدد المحاولات المسموحة مؤقتاً. يرجى الانتظار قليلاً ثم المحاولة مجدداً.';
-  }
-
-  if (
-    combined.includes('permission-denied') ||
-    combined.includes('missing or insufficient permissions')
-  ) {
-    return lang === 'en'
-      ? 'Cloud Firestore rejected the write (permission-denied). Please copy the updated firestore.rules from Settings and publish them in Firebase Console > Firestore Database > Rules.'
-      : 'رفضت قاعدة البيانات السحابية العملية بسبب صلاحيات الحماية (permission-denied). يرجى نسخ كود firestore.rules المحدّث ولصقه ثم الضغط على Publish في Firebase Console > Firestore Database > Rules.';
-  }
-
-  if (
-    combined.includes('network-request-failed') ||
-    combined.includes('client is offline') ||
-    combined.includes('unavailable') ||
-    combined.includes('failed to get document because the client is offline')
-  ) {
-    return lang === 'en'
-      ? 'Unable to reach Firebase Cloud servers. Please check your internet connection.'
-      : 'تعذر الاتصال بخوادم السحابة (Firebase). يرجى التحقق من اتصالك بالإنترنت.';
-  }
-
-  return lang === 'en'
-    ? `Cloud error: ${rawMessage || 'Unknown Firebase error'}`
-    : `خطأ في الاتصال بالسحابة: ${rawMessage || 'حدث خطأ غير متوقع في Firebase'}`;
+  return globalErrorHandler.toUserMessage(error, lang, category);
 }
 
 /**
  * Structured error handler for Firestore operations.
+ * Records full technical details in developer logs (console + in-memory buffer)
+ * without exposing technical details to players.
  */
 export function handleFirestoreError(
   error: unknown,
   operationType: OperationType,
   path: string | null,
-  shouldThrow = false
+  shouldThrow = false,
+  category: ErrorCategory = 'sync'
 ): FirestoreErrorInfo {
   const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
@@ -221,7 +154,16 @@ export function handleFirestoreError(
     operationType,
     path,
   };
-  console.warn('Firestore Sync Notice:', JSON.stringify(errInfo));
+  globalErrorHandler.recordAndFormat({
+    error,
+    category,
+    operation: operationType,
+    path,
+    userId: auth.currentUser?.uid ?? null,
+    context: {
+      isAnonymous: auth.currentUser?.isAnonymous ?? null,
+    },
+  });
   if (shouldThrow) {
     throw new Error(JSON.stringify(errInfo));
   }
@@ -317,7 +259,7 @@ export async function testFirestoreConnection(timeoutMs = 6000): Promise<{
     return {
       connected: false,
       isNetworkError: true,
-      errorDetail: 'لا يوجد اتصال بالإنترنت (Device is offline)',
+      errorDetail: 'لا يوجد اتصال بالإنترنت',
     };
   }
 
@@ -333,12 +275,18 @@ export async function testFirestoreConnection(timeoutMs = 6000): Promise<{
     await Promise.race([serverCheckPromise, timeoutPromise]);
     return { connected: true, isNetworkError: false };
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
     if (isNetworkConnectivityError(error)) {
+      globalErrorHandler.recordAndFormat({
+        error,
+        category: 'network',
+        operation: 'connectivity_probe',
+        path: 'test/connection',
+        userId: auth.currentUser?.uid ?? null,
+      });
       return {
         connected: false,
         isNetworkError: true,
-        errorDetail: msg,
+        errorDetail: 'تعذر الاتصال بالإنترنت',
       };
     }
     // If Firestore responded with permission-denied, the server IS reachable over the internet
@@ -691,6 +639,8 @@ service cloud.firestore {
         && data.lastProfileEditAt >= 0
         && data.updatedAtMs is int
         && data.updatedAtMs >= 0
+        && (!('lastPointsAt' in data) || data.lastPointsAt is timestamp)
+        && (!('currentMonthKey' in data) || (data.currentMonthKey is string && data.currentMonthKey.matches('^[0-9]{4}-[0-9]{2}$')))
         && hasValidOptionalContact(data);
     }
 
@@ -741,21 +691,62 @@ service cloud.firestore {
         && data.rankTitle.size() <= 40
         && data.vipTier in ['none', 'bronze', 'silver', 'gold', 'legend']
         && data.updatedAtMs is int
-        && data.updatedAtMs >= 0;
+        && data.updatedAtMs >= 0
+        && (!('lastPointsAt' in data) || data.lastPointsAt is timestamp)
+        && (!('currentMonthKey' in data) || (data.currentMonthKey is string && data.currentMonthKey.matches('^[0-9]{4}-[0-9]{2}$')));
     }
 
-    // التحقق من عدم تجاوز الحد الأقصى لزيادة النقاط (+2 نقطة فقط في التحديث الواحد للجولة)
+    // التحقق من عدم حذف أو إرجاع مفتاح الشهر للخلف بعد تعيينه
+    function isValidMonthKeyTransition() {
+      return !('currentMonthKey' in existing())
+        || (
+          ('currentMonthKey' in incoming())
+          && incoming().currentMonthKey is string
+          && incoming().currentMonthKey.matches('^[0-9]{4}-[0-9]{2}$')
+          && incoming().currentMonthKey >= existing().currentMonthKey
+        );
+    }
+
+    // التحقق من انتقال الشهر الميلادي بشكل نظامي لتصفير نقاط الشهر الجديد بأمان
+    function isNewMonthReset() {
+      return ('currentMonthKey' in existing())
+        && existing().currentMonthKey is string
+        && ('currentMonthKey' in incoming())
+        && incoming().currentMonthKey is string
+        && incoming().currentMonthKey.matches('^[0-9]{4}-[0-9]{2}$')
+        && incoming().currentMonthKey > existing().currentMonthKey;
+    }
+
+    // التحقق من عدم تجاوز الحد الأقصى لزيادة النقاط (+2 نقطة فقط في التحديث الواحد للجولة) أو التصفير النظامي لبداية شهر جديد
     function isValidPointsDelta() {
-      return incoming().monthlyRoundPoints >= existing().monthlyRoundPoints
-        && (incoming().monthlyRoundPoints - existing().monthlyRoundPoints) <= 2;
+      return isValidMonthKeyTransition() && (
+        (
+          incoming().monthlyRoundPoints >= existing().monthlyRoundPoints
+          && (incoming().monthlyRoundPoints - existing().monthlyRoundPoints) <= 2
+        ) || (
+          isNewMonthReset()
+          && incoming().monthlyRoundPoints >= 0
+          && incoming().monthlyRoundPoints <= 2
+        )
+      );
     }
 
-    // منع تكرار إرسال تحديثات النقاط الوهمية (Rate Limiting: فاصل 25 ثانية على الأقل بين كل تحديث جولة وآخر)
+    // منع تكرار إرسال تحديثات النقاط الوهمية باستخدام ختم وقت الخادم الحقيقي (lastPointsAt == request.time) بفاصل 8 ثوانٍ على الأقل
     function isValidPointsRateLimit() {
-      let pointsIncreased = incoming().monthlyRoundPoints > existing().monthlyRoundPoints;
+      let pointsIncreased = (
+        !isNewMonthReset()
+        && incoming().monthlyRoundPoints > existing().monthlyRoundPoints
+      ) || (
+        isNewMonthReset()
+        && incoming().monthlyRoundPoints > 0
+      );
       return !pointsIncreased || (
-        incoming().updatedAtMs == request.time.toMillis()
-        && (request.time.toMillis() - existing().updatedAtMs) >= 25000
+        ('lastPointsAt' in incoming())
+        && incoming().lastPointsAt == request.time
+        && (
+          !('lastPointsAt' in existing())
+          || request.time >= existing().lastPointsAt + duration.value(8, 's')
+        )
       );
     }
 
@@ -825,8 +816,14 @@ service cloud.firestore {
       allow create: if isOwner(uid)
         && isValidId(uid)
         && isValidPublicLeaderboardShape(incoming(), uid)
-        && incoming().vipTier == 'none'
-        && incoming().monthlyRoundPoints <= 2;
+        && (
+          (incoming().vipTier == 'none' && incoming().monthlyRoundPoints <= 2)
+          || (
+            exists(/databases/$(database)/documents/players/$(uid))
+            && incoming().vipTier == get(/databases/$(database)/documents/players/$(uid)).data.vipTier
+            && incoming().monthlyRoundPoints == get(/databases/$(database)/documents/players/$(uid)).data.monthlyRoundPoints
+          )
+        );
 
       allow update: if isOwner(uid)
         && isValidId(uid)

@@ -53,6 +53,7 @@ import {
   signOut,
 } from '../firebaseConfig';
 import { antiCheatGuard } from '../utils/antiCheatGuard';
+import { globalErrorHandler } from '../utils/globalErrorHandler';
 
 const STORAGE_KEY_LEGACY_PROFILE = 'midan_almarifa_player_v1';
 const STORAGE_KEY_ACCOUNTS = 'midan_almarifa_accounts_v2';
@@ -602,6 +603,14 @@ export interface CloudSyncStatus {
 export class StorageRepository {
   private cloudLeaderboardCache: LeaderboardEntry[] = [];
   private rateLimitRetryTimer: number | null = null;
+  private isSyncInFlight = false;
+  private pendingSyncRequest: {
+    profile: PlayerProfile;
+    oldUsernameNormalized?: string;
+    isIdentityEdit?: boolean;
+  } | null = null;
+  private lastPlayerPointsWriteAtMs = 0;
+  private lastPublicPointsWriteAtMs = 0;
   private cloudStatus: CloudSyncStatus = {
     connected: typeof navigator !== 'undefined' ? navigator.onLine !== false : true,
     isNetworkOffline: typeof navigator !== 'undefined' ? navigator.onLine === false : false,
@@ -811,6 +820,7 @@ export class StorageRepository {
     options?: {
       skipCloudSync?: boolean;
       oldUsernameNormalized?: string;
+      isIdentityEdit?: boolean;
     }
   ): PlayerProfile {
     const unlockedSet = new Set(profile.unlockedBadges);
@@ -859,7 +869,12 @@ export class StorageRepository {
     }
 
     if (!options?.skipCloudSync) {
-      void this.syncProfileToFirestore(updated, options?.oldUsernameNormalized);
+      void this.syncProfileToFirestore(
+        updated,
+        options?.oldUsernameNormalized,
+        false,
+        Boolean(options?.isIdentityEdit || options?.oldUsernameNormalized)
+      );
     }
 
     return updated;
@@ -910,8 +925,10 @@ export class StorageRepository {
     rankTitleEn: string;
     vipTier: VipTier;
     updatedAtMs: number;
+    currentMonthKey?: string;
+    lastPointsAt?: unknown;
   }) {
-    return {
+    const base: Record<string, unknown> = {
       uid: params.uid,
       playerId: params.playerId,
       username: params.username,
@@ -926,23 +943,107 @@ export class StorageRepository {
       vipTier: params.vipTier,
       updatedAtMs: params.updatedAtMs,
     };
+    if (params.currentMonthKey && /^[0-9]{4}-[0-9]{2}$/.test(params.currentMonthKey)) {
+      base.currentMonthKey = params.currentMonthKey;
+    }
+    if (params.lastPointsAt !== undefined && params.lastPointsAt !== null) {
+      base.lastPointsAt = params.lastPointsAt;
+    }
+    return base;
+  }
+
+  private extractTimestampMs(value: unknown): number {
+    if (
+      value &&
+      typeof value === 'object' &&
+      'toMillis' in value &&
+      typeof (value as { toMillis?: unknown }).toMillis === 'function'
+    ) {
+      const ms = (value as { toMillis: () => number }).toMillis();
+      return Number.isFinite(ms) ? ms : 0;
+    }
+    return 0;
+  }
+
+  private sanitizeSyncStrings(
+    profile: PlayerProfile,
+    uid: string
+  ): {
+    safePlayerId: string;
+    safeUsername: string;
+    safeUsernameNorm: string;
+    safeCountryCode: string;
+    safeCountryName: string;
+    safeCountryFlag: string;
+    safeMonthKey: string;
+  } {
+    const rawId = String(profile.playerId || '').replace(/\D/g, '');
+    const safePlayerId =
+      rawId.length === 10 ? rawId : rawId.padEnd(10, '0').slice(0, 10);
+
+    let safeUsername = (profile.username || '').trim().slice(0, 24);
+    if (safeUsername.length < 2) {
+      safeUsername = `بطل_${uid.slice(0, 4)}`;
+    }
+
+    let safeUsernameNorm = normalizeUsernameKey(safeUsername).slice(0, 24);
+    if (safeUsernameNorm.length < 2) {
+      safeUsernameNorm = `p_${uid.slice(0, 8)}`.slice(0, 24);
+    }
+
+    const rawCode = (profile.country?.code || 'SA').trim().slice(0, 4);
+    const safeCountryCode = rawCode.length >= 2 ? rawCode : 'SA';
+
+    const rawCountryName = (profile.country?.name || 'السعودية').trim().slice(0, 50);
+    const safeCountryName = rawCountryName.length >= 2 ? rawCountryName : 'السعودية';
+
+    const rawFlag = (profile.country?.flag || '🌍').trim().slice(0, 16);
+    const safeCountryFlag = rawFlag.length >= 1 ? rawFlag : '🌍';
+
+    const rawMonth = profile.currentMonthKey || getCurrentMonthKey();
+    const safeMonthKey = /^[0-9]{4}-[0-9]{2}$/.test(rawMonth)
+      ? rawMonth
+      : getCurrentMonthKey();
+
+    return {
+      safePlayerId,
+      safeUsername,
+      safeUsernameNorm,
+      safeCountryCode,
+      safeCountryName,
+      safeCountryFlag,
+      safeMonthKey,
+    };
+  }
+
+  private scheduleFollowUpSync(delayMs: number): void {
+    if (typeof window === 'undefined') return;
+    if (this.rateLimitRetryTimer) {
+      window.clearTimeout(this.rateLimitRetryTimer);
+    }
+    this.rateLimitRetryTimer = window.setTimeout(() => {
+      this.rateLimitRetryTimer = null;
+      const latestLocal = this.loadProfile();
+      if (latestLocal) {
+        void this.syncProfileToFirestore(latestLocal);
+      }
+    }, Math.max(2000, delayMs));
   }
 
   /**
    * Synchronizes the player profile to:
    * 1. Private document `/players/{uid}` (readable strictly by `isOwner(uid)`)
    * 2. Public leaderboard document `/leaderboard_public/{uid}` (non-sensitive fields only)
-   * 3. Global username reservation `/usernames/{nameNormalized}`
+   * 3. Global username reservation `/usernames/{nameNormalized}` (only on creation or explicit rename)
    *
-   * Strictly obeys `firestore.rules`:
-   * - Client updates keep `vipTier == existing().vipTier` and `adsRemoved == existing().adsRemoved`
-   * - Client coin increases are capped at `coinDiff <= 120`
-   * - Point increases obey `+2` max delta and `>= 25000ms` (25 seconds) rate limit between round updates.
+   * Serialized via single-flight queue so rapid consecutive rounds/matches NEVER collide
+   * on Firestore snapshots or trigger `permission-denied` rate-limit races.
    */
   public async syncProfileToFirestore(
     profile: PlayerProfile,
     oldUsernameNormalized?: string,
-    throwOnError = false
+    throwOnError = false,
+    isIdentityEdit = false
   ): Promise<void> {
     if (typeof navigator !== 'undefined' && navigator.onLine === false) {
       this.setCloudStatus(
@@ -958,31 +1059,82 @@ export class StorageRepository {
       return;
     }
 
+    // Coalesce concurrent non-blocking sync calls so only one write pipeline runs at a time
+    if (this.isSyncInFlight && !throwOnError) {
+      this.pendingSyncRequest = {
+        profile,
+        oldUsernameNormalized:
+          oldUsernameNormalized || this.pendingSyncRequest?.oldUsernameNormalized,
+        isIdentityEdit: isIdentityEdit || this.pendingSyncRequest?.isIdentityEdit,
+      };
+      return;
+    }
+
+    this.isSyncInFlight = true;
+    try {
+      await this.executeSyncProfileToFirestore(
+        profile,
+        oldUsernameNormalized,
+        throwOnError,
+        isIdentityEdit
+      );
+    } finally {
+      this.isSyncInFlight = false;
+      if (this.pendingSyncRequest) {
+        const nextReq = this.pendingSyncRequest;
+        this.pendingSyncRequest = null;
+        void this.syncProfileToFirestore(
+          nextReq.profile,
+          nextReq.oldUsernameNormalized,
+          false,
+          Boolean(nextReq.isIdentityEdit)
+        );
+      }
+    }
+  }
+
+  private async executeSyncProfileToFirestore(
+    profile: PlayerProfile,
+    oldUsernameNormalized?: string,
+    throwOnError = false,
+    isIdentityEdit = false
+  ): Promise<void> {
+    let activeOpPath = 'players/sync';
+    let activeOpType: OperationType = OperationType.WRITE;
+
     try {
       const uid = auth.currentUser?.uid || profile.uid || (await ensureFirebaseAuthSession());
       if (!uid) {
         if (throwOnError) {
-          throw new Error('Auth session missing (uid is null)');
+          throw new Error('Auth session missing');
         }
         return;
       }
 
       const playerRef = doc(db, 'players', uid);
       const publicRef = doc(db, 'leaderboard_public', uid);
-      const normalizedName = normalizeUsernameKey(profile.username);
       const levelInfo = calculateLevelAndRank(profile.xp);
       const contactFields = this.buildContactFieldsForFirestore(profile);
+      const sanitized = this.sanitizeSyncStrings(profile, uid);
 
-      let existingSnap;
+      activeOpPath = `players/${uid}`;
+      activeOpType = OperationType.GET;
+
+      let existingPlayerSnap;
+      let existingPublicSnap;
       try {
-        existingSnap = await getDoc(playerRef);
+        [existingPlayerSnap, existingPublicSnap] = await globalErrorHandler.withSafeRetry(
+          () => Promise.all([getDoc(playerRef), getDoc(publicRef)]),
+          { maxRetries: 2, baseDelayMs: 500 }
+        );
       } catch (err) {
         const formatted = formatFirebaseAuthOrFirestoreError(
           err,
-          profile.settings?.language || 'ar'
+          profile.settings?.language || 'ar',
+          'sync'
         );
         this.setCloudStatus(false, formatted, isNetworkConnectivityError(err));
-        handleFirestoreError(err, OperationType.GET, `players/${uid}`);
+        handleFirestoreError(err, OperationType.GET, `players/${uid}`, false, 'sync');
         if (throwOnError) throw err;
         return;
       }
@@ -994,34 +1146,36 @@ export class StorageRepository {
         0,
         Math.min(100, Math.floor(profile.fairPlayScore ?? 100))
       );
+      const safeRankTitle = (levelInfo.rankTitle || 'مبتدئ واعد').slice(0, 40);
+      const safeRankTitleEn = (levelInfo.rankTitleEn || 'Rising Challenger').slice(0, 40);
+      const safeLevel = Math.max(1, Math.floor(levelInfo.level || 1));
       const lastEditMs = Math.max(0, Math.floor(profile.lastProfileEditAt ?? 0));
       const nowMs = Date.now();
+      const POINTS_COOLDOWN_MS = 8500;
 
-      if (!existingSnap.exists()) {
-        // Initial create: firestore.rules requires vipTier == 'none', adsRemoved == false, coins <= 100, monthlyRoundPoints <= 2
+      if (!existingPlayerSnap.exists()) {
+        // Initial create: obeys firestore.rules (vipTier == 'none', adsRemoved == false, coins <= 100, monthlyRoundPoints <= 2, fairPlayScore == 100)
         const initialPoints = Math.min(2, targetPoints);
         const initialCoins = Math.min(100, targetCoins);
-        const cleanUsername = profile.username.trim().slice(0, 24);
-        const cleanNormName = normalizedName.slice(0, 24);
 
-        const initialDocData = {
+        const initialDocData: Record<string, unknown> = {
           uid,
-          playerId: profile.playerId,
-          username: cleanUsername,
-          usernameNormalized: cleanNormName,
-          countryCode: profile.country.code,
-          countryName: profile.country.name,
-          countryFlag: profile.country.flag,
+          playerId: sanitized.safePlayerId,
+          username: sanitized.safeUsername,
+          usernameNormalized: sanitized.safeUsernameNorm,
+          countryCode: sanitized.safeCountryCode,
+          countryName: sanitized.safeCountryName,
+          countryFlag: sanitized.safeCountryFlag,
           country: profile.country,
           ...contactFields,
           monthlyRoundPoints: initialPoints,
           monthlyPoints: initialPoints,
-          currentMonthKey: profile.currentMonthKey,
+          currentMonthKey: sanitized.safeMonthKey,
           coins: initialCoins,
           xp: targetXp,
-          level: levelInfo.level,
-          rankTitle: levelInfo.rankTitle,
-          rankTitleEn: levelInfo.rankTitleEn,
+          level: safeLevel,
+          rankTitle: safeRankTitle,
+          rankTitleEn: safeRankTitleEn,
           vipTier: 'none' as VipTier,
           adsRemoved: false,
           fairPlayScore: 100,
@@ -1029,178 +1183,403 @@ export class StorageRepository {
           createdAt: profile.createdAt || new Date().toISOString(),
           updatedAtMs: nowMs,
         };
+        if (initialPoints > 0) {
+          initialDocData.lastPointsAt = serverTimestamp();
+        }
 
-        await setDoc(playerRef, initialDocData);
+        activeOpPath = `players/${uid}`;
+        activeOpType = OperationType.CREATE;
+        await globalErrorHandler.withSafeRetry(() => setDoc(playerRef, initialDocData));
+        if (initialPoints > 0) {
+          this.lastPlayerPointsWriteAtMs = Date.now();
+        }
 
         // Mirror public non-sensitive fields to `/leaderboard_public/{uid}`
-        await setDoc(
-          publicRef,
-          this.buildPublicLeaderboardPayload({
-            uid,
-            playerId: profile.playerId,
-            username: cleanUsername,
-            usernameNormalized: cleanNormName,
-            countryCode: profile.country.code,
-            countryName: profile.country.name,
-            countryFlag: profile.country.flag,
-            monthlyRoundPoints: initialPoints,
-            level: levelInfo.level,
-            rankTitle: levelInfo.rankTitle,
-            rankTitleEn: levelInfo.rankTitleEn,
-            vipTier: 'none',
-            updatedAtMs: nowMs,
-          })
+        activeOpPath = `leaderboard_public/${uid}`;
+        activeOpType = existingPublicSnap.exists()
+          ? OperationType.UPDATE
+          : OperationType.CREATE;
+        await globalErrorHandler.withSafeRetry(() =>
+          setDoc(
+            publicRef,
+            this.buildPublicLeaderboardPayload({
+              uid,
+              playerId: sanitized.safePlayerId,
+              username: sanitized.safeUsername,
+              usernameNormalized: sanitized.safeUsernameNorm,
+              countryCode: sanitized.safeCountryCode,
+              countryName: sanitized.safeCountryName,
+              countryFlag: sanitized.safeCountryFlag,
+              monthlyRoundPoints: initialPoints,
+              level: safeLevel,
+              rankTitle: safeRankTitle,
+              rankTitleEn: safeRankTitleEn,
+              vipTier: 'none',
+              updatedAtMs: nowMs,
+              currentMonthKey: sanitized.safeMonthKey,
+              lastPointsAt: initialPoints > 0 ? serverTimestamp() : undefined,
+            })
+          )
         );
+        if (initialPoints > 0) {
+          this.lastPublicPointsWriteAtMs = Date.now();
+        }
 
-        // Reserve username globally in usernames/{nameNormalized}
-        const usernameRef = doc(db, 'usernames', cleanNormName);
-        await setDoc(usernameRef, {
-          uid,
-          username: cleanUsername,
-          playerId: profile.playerId,
-          createdAt: nowMs,
-          reservedAtMs: nowMs,
-        });
+        // Reserve username globally only if unoccupied or already owned by this UID
+        try {
+          const usernameRef = doc(db, 'usernames', sanitized.safeUsernameNorm);
+          const uSnap = await getDoc(usernameRef);
+          if (!uSnap.exists() || uSnap.data()?.uid === uid) {
+            await setDoc(usernameRef, {
+              uid,
+              username: sanitized.safeUsername,
+              playerId: sanitized.safePlayerId,
+              createdAt: nowMs,
+              reservedAtMs: nowMs,
+            });
+          }
+        } catch (uErr) {
+          handleFirestoreError(
+            uErr,
+            OperationType.WRITE,
+            `usernames/${sanitized.safeUsernameNorm}`,
+            false,
+            'sync'
+          );
+        }
 
-        this.setCloudStatus(true, null);
+        if (targetPoints > initialPoints || targetCoins > initialCoins) {
+          this.scheduleFollowUpSync(9000);
+        }
+
+        this.setCloudStatus(true, null, false);
         return;
       }
 
-      // Existing cloud document update — respect:
-      // 1) incoming().vipTier == existing().vipTier & incoming().adsRemoved == existing().adsRemoved
-      // 2) coinDiff <= 120
-      // 3) monthlyRoundPoints delta <= 2 AND >= 25000ms interval since existing().updatedAtMs
-      const cloudData = existingSnap.data();
+      // Existing cloud document update — strictly obeys all security rules:
+      // 1) Owner-only, immutable uid/playerId/vipTier/adsRemoved
+      // 2) Points delta <= +2 (or legitimate new-month reset), serverTimestamp `lastPointsAt` >= 8s
+      // 3) Coins delta <= +120
+      // 4) Identity fields preserved from cloudData unless explicit identity edit
+      // 5) fairPlayScore never increased
+      const cloudData = existingPlayerSnap.data();
       const currentCloudPts =
         typeof cloudData.monthlyRoundPoints === 'number'
-          ? cloudData.monthlyRoundPoints
+          ? Math.max(0, Math.floor(cloudData.monthlyRoundPoints))
           : 0;
       const currentCloudCoins =
-        typeof cloudData.coins === 'number' ? cloudData.coins : 50;
+        typeof cloudData.coins === 'number' ? Math.max(0, Math.floor(cloudData.coins)) : 50;
       const currentCloudFairPlay =
-        typeof cloudData.fairPlayScore === 'number' ? cloudData.fairPlayScore : 100;
-      const lastCloudUpdatedAtMs =
-        typeof cloudData.updatedAtMs === 'number' ? cloudData.updatedAtMs : 0;
+        typeof cloudData.fairPlayScore === 'number'
+          ? Math.max(0, Math.min(100, Math.floor(cloudData.fairPlayScore)))
+          : 100;
+      const cloudMonthKey =
+        typeof cloudData.currentMonthKey === 'string' &&
+        /^[0-9]{4}-[0-9]{2}$/.test(cloudData.currentMonthKey)
+          ? cloudData.currentMonthKey
+          : null;
 
-      // Never increase fairPlayScore above cloud value
+      // Never roll month key backward
+      const effectivePlayerMonthKey =
+        cloudMonthKey && cloudMonthKey > sanitized.safeMonthKey
+          ? cloudMonthKey
+          : sanitized.safeMonthKey;
+      const isPlayerNewMonthReset = Boolean(
+        cloudMonthKey && effectivePlayerMonthKey > cloudMonthKey
+      );
+
+      // Preserve cloud identity fields on normal match/gameplay syncs so multi-device
+      // sessions NEVER trip the 50-day identity cooldown check (`isValidIdentityChangeCooldown`)
+      const allowIdentityMutation = Boolean(isIdentityEdit || oldUsernameNormalized);
+      const finalUsername = allowIdentityMutation
+        ? sanitized.safeUsername
+        : typeof cloudData.username === 'string' && cloudData.username.length >= 2
+        ? cloudData.username.slice(0, 24)
+        : sanitized.safeUsername;
+      const finalUsernameNorm = allowIdentityMutation
+        ? sanitized.safeUsernameNorm
+        : typeof cloudData.usernameNormalized === 'string' &&
+          cloudData.usernameNormalized.length >= 2
+        ? cloudData.usernameNormalized.slice(0, 24)
+        : sanitized.safeUsernameNorm;
+      const finalCountryCode = allowIdentityMutation
+        ? sanitized.safeCountryCode
+        : typeof cloudData.countryCode === 'string' && cloudData.countryCode.length >= 2
+        ? cloudData.countryCode.slice(0, 4)
+        : sanitized.safeCountryCode;
+      const finalCountryName = allowIdentityMutation
+        ? sanitized.safeCountryName
+        : typeof cloudData.countryName === 'string' && cloudData.countryName.length >= 2
+        ? cloudData.countryName.slice(0, 50)
+        : sanitized.safeCountryName;
+      const finalCountryFlag = allowIdentityMutation
+        ? sanitized.safeCountryFlag
+        : typeof cloudData.countryFlag === 'string' && cloudData.countryFlag.length >= 1
+        ? cloudData.countryFlag.slice(0, 16)
+        : sanitized.safeCountryFlag;
+      const finalLastEditAt = allowIdentityMutation
+        ? Math.max(
+            typeof cloudData.lastProfileEditAt === 'number' ? cloudData.lastProfileEditAt : 0,
+            lastEditMs
+          )
+        : typeof cloudData.lastProfileEditAt === 'number'
+        ? cloudData.lastProfileEditAt
+        : 0;
+
+      const safePlayerId =
+        typeof cloudData.playerId === 'string' && cloudData.playerId.length === 10
+          ? cloudData.playerId
+          : sanitized.safePlayerId;
       const safeFairPlay = Math.min(currentCloudFairPlay, targetFairPlay);
-
-      // Keep server-authoritative vipTier and adsRemoved on client updates
       const lockedVipTier: VipTier = (cloudData.vipTier as VipTier) || 'none';
       const lockedAdsRemoved = Boolean(cloudData.adsRemoved);
 
-      // Cap client coin increase at <= 120 per update
+      // Cap client coin increase at <= 120 per update (decreases are always valid)
       const nextCoins =
         targetCoins >= currentCloudCoins
           ? Math.min(targetCoins, currentCloudCoins + 120)
           : targetCoins;
 
-      // Check 25-second rate limit before increasing monthlyRoundPoints
-      const elapsedSinceLastUpdateMs = nowMs - lastCloudUpdatedAtMs;
-      const canIncreasePointsNow =
-        targetPoints > currentCloudPts &&
-        (lastCloudUpdatedAtMs === 0 || elapsedSinceLastUpdateMs >= 25000);
+      // Enforce 8.5s server-timestamp cooldown before incrementing monthlyRoundPoints
+      const existingPlayerLastPointsMs = this.extractTimestampMs(cloudData.lastPointsAt);
+      const elapsedFromCloudPlayerMs =
+        existingPlayerLastPointsMs > 0
+          ? Math.max(0, nowMs - existingPlayerLastPointsMs)
+          : Infinity;
+      const elapsedFromLocalPlayerMs =
+        this.lastPlayerPointsWriteAtMs > 0
+          ? Math.max(0, nowMs - this.lastPlayerPointsWriteAtMs)
+          : Infinity;
+      const effectivePlayerCooldownElapsedMs = Math.min(
+        elapsedFromCloudPlayerMs,
+        elapsedFromLocalPlayerMs
+      );
+      const playerCooldownReady = effectivePlayerCooldownElapsedMs >= POINTS_COOLDOWN_MS;
 
-      const nextPts = canIncreasePointsNow
-        ? Math.min(targetPoints, currentCloudPts + 2)
-        : currentCloudPts;
+      let nextPlayerPts = currentCloudPts;
+      let playerPointsIncreased = false;
 
-      const nextUpdatedAtMs = canIncreasePointsNow
-        ? nowMs
-        : lastCloudUpdatedAtMs || nowMs;
+      if (isPlayerNewMonthReset) {
+        if (targetPoints > 0 && playerCooldownReady) {
+          nextPlayerPts = Math.min(2, targetPoints);
+          playerPointsIncreased = nextPlayerPts > 0;
+        } else {
+          nextPlayerPts = 0;
+          playerPointsIncreased = false;
+        }
+      } else if (targetPoints > currentCloudPts && playerCooldownReady) {
+        nextPlayerPts = Math.min(targetPoints, currentCloudPts + 2);
+        playerPointsIncreased = nextPlayerPts > currentCloudPts;
+      }
 
-      const cleanUsername = profile.username.trim().slice(0, 24);
-      const cleanNormName = normalizedName.slice(0, 24);
-
-      const payload = {
+      const playerPayload: Record<string, unknown> = {
         uid,
-        playerId: cloudData.playerId || profile.playerId,
-        username: cleanUsername,
-        usernameNormalized: cleanNormName,
-        countryCode: profile.country.code,
-        countryName: profile.country.name,
-        countryFlag: profile.country.flag,
-        country: profile.country,
+        playerId: safePlayerId,
+        username: finalUsername,
+        usernameNormalized: finalUsernameNorm,
+        countryCode: finalCountryCode,
+        countryName: finalCountryName,
+        countryFlag: finalCountryFlag,
+        country: allowIdentityMutation ? profile.country : cloudData.country || profile.country,
         ...contactFields,
-        monthlyRoundPoints: nextPts,
-        monthlyPoints: nextPts,
-        currentMonthKey: profile.currentMonthKey,
+        monthlyRoundPoints: nextPlayerPts,
+        monthlyPoints: nextPlayerPts,
+        currentMonthKey: effectivePlayerMonthKey,
         coins: nextCoins,
         xp: targetXp,
-        level: levelInfo.level,
-        rankTitle: levelInfo.rankTitle,
-        rankTitleEn: levelInfo.rankTitleEn,
+        level: safeLevel,
+        rankTitle: safeRankTitle,
+        rankTitleEn: safeRankTitleEn,
         vipTier: lockedVipTier,
         adsRemoved: lockedAdsRemoved,
         fairPlayScore: safeFairPlay,
-        lastProfileEditAt: lastEditMs,
+        lastProfileEditAt: finalLastEditAt,
         createdAt: cloudData.createdAt || profile.createdAt || new Date().toISOString(),
-        updatedAtMs: nextUpdatedAtMs,
+        updatedAtMs: nowMs,
       };
 
-      await setDoc(playerRef, payload);
-
-      // Mirror public non-sensitive fields to `/leaderboard_public/{uid}`
-      await setDoc(
-        publicRef,
-        this.buildPublicLeaderboardPayload({
-          uid,
-          playerId: cloudData.playerId || profile.playerId,
-          username: cleanUsername,
-          usernameNormalized: cleanNormName,
-          countryCode: profile.country.code,
-          countryName: profile.country.name,
-          countryFlag: profile.country.flag,
-          monthlyRoundPoints: nextPts,
-          level: levelInfo.level,
-          rankTitle: levelInfo.rankTitle,
-          rankTitleEn: levelInfo.rankTitleEn,
-          vipTier: lockedVipTier,
-          updatedAtMs: nextUpdatedAtMs,
-        })
-      );
-
-      // If more points remain queued due to the 25-second rate limit, schedule automatic follow-up sync
-      if (targetPoints > nextPts && typeof window !== 'undefined') {
-        const waitMs = Math.max(
-          25100,
-          25100 - Math.max(0, elapsedSinceLastUpdateMs)
-        );
-        if (this.rateLimitRetryTimer) {
-          window.clearTimeout(this.rateLimitRetryTimer);
-        }
-        this.rateLimitRetryTimer = window.setTimeout(() => {
-          const latestLocal = this.loadProfile();
-          if (latestLocal) {
-            void this.syncProfileToFirestore(latestLocal);
-          }
-        }, waitMs);
+      if (playerPointsIncreased) {
+        playerPayload.lastPointsAt = serverTimestamp();
+      } else if (cloudData.lastPointsAt !== undefined && cloudData.lastPointsAt !== null) {
+        playerPayload.lastPointsAt = cloudData.lastPointsAt;
       }
 
-      // Update username reservation if changed
-      if (oldUsernameNormalized && oldUsernameNormalized !== cleanNormName) {
+      activeOpPath = `players/${uid}`;
+      activeOpType = OperationType.UPDATE;
+      await globalErrorHandler.withSafeRetry(() => setDoc(playerRef, playerPayload));
+      if (playerPointsIncreased) {
+        this.lastPlayerPointsWriteAtMs = Date.now();
+      }
+
+      // Now synchronize `/leaderboard_public/{uid}` independently using its own snapshot
+      let nextPublicPts = nextPlayerPts;
+      let publicPointsIncreased = false;
+      let publicNeedsFollowUp = false;
+
+      if (!existingPublicSnap.exists()) {
+        // Creating missing public leaderboard doc matching `players/{uid}` (permitted by updated rules)
+        activeOpPath = `leaderboard_public/${uid}`;
+        activeOpType = OperationType.CREATE;
+        await globalErrorHandler.withSafeRetry(() =>
+          setDoc(
+            publicRef,
+            this.buildPublicLeaderboardPayload({
+              uid,
+              playerId: safePlayerId,
+              username: finalUsername,
+              usernameNormalized: finalUsernameNorm,
+              countryCode: finalCountryCode,
+              countryName: finalCountryName,
+              countryFlag: finalCountryFlag,
+              monthlyRoundPoints: nextPlayerPts,
+              level: safeLevel,
+              rankTitle: safeRankTitle,
+              rankTitleEn: safeRankTitleEn,
+              vipTier: lockedVipTier,
+              updatedAtMs: nowMs,
+              currentMonthKey: effectivePlayerMonthKey,
+              lastPointsAt: nextPlayerPts > 0 ? serverTimestamp() : undefined,
+            })
+          )
+        );
+        if (nextPlayerPts > 0) {
+          this.lastPublicPointsWriteAtMs = Date.now();
+        }
+      } else {
+        const publicData = existingPublicSnap.data();
+        const currentPublicPts =
+          typeof publicData.monthlyRoundPoints === 'number'
+            ? Math.max(0, Math.floor(publicData.monthlyRoundPoints))
+            : 0;
+        const lockedPublicVipTier: VipTier =
+          (publicData.vipTier as VipTier) || lockedVipTier || 'none';
+        const publicMonthKey =
+          typeof publicData.currentMonthKey === 'string' &&
+          /^[0-9]{4}-[0-9]{2}$/.test(publicData.currentMonthKey)
+            ? publicData.currentMonthKey
+            : null;
+        const effectivePublicMonthKey =
+          publicMonthKey && publicMonthKey > effectivePlayerMonthKey
+            ? publicMonthKey
+            : effectivePlayerMonthKey;
+        const isPublicNewMonthReset = Boolean(
+          publicMonthKey && effectivePublicMonthKey > publicMonthKey
+        );
+
+        const existingPublicLastPointsMs = this.extractTimestampMs(publicData.lastPointsAt);
+        const elapsedFromCloudPublicMs =
+          existingPublicLastPointsMs > 0
+            ? Math.max(0, nowMs - existingPublicLastPointsMs)
+            : Infinity;
+        const elapsedFromLocalPublicMs =
+          this.lastPublicPointsWriteAtMs > 0
+            ? Math.max(0, nowMs - this.lastPublicPointsWriteAtMs)
+            : Infinity;
+        const publicCooldownReady =
+          Math.min(elapsedFromCloudPublicMs, elapsedFromLocalPublicMs) >= POINTS_COOLDOWN_MS;
+
+        nextPublicPts = currentPublicPts;
+        if (isPublicNewMonthReset) {
+          if (nextPlayerPts > 0 && publicCooldownReady) {
+            nextPublicPts = Math.min(2, nextPlayerPts);
+            publicPointsIncreased = nextPublicPts > 0;
+          } else {
+            nextPublicPts = 0;
+            publicPointsIncreased = false;
+          }
+        } else if (nextPlayerPts > currentPublicPts && publicCooldownReady) {
+          nextPublicPts = Math.min(nextPlayerPts, currentPublicPts + 2);
+          publicPointsIncreased = nextPublicPts > currentPublicPts;
+        }
+
+        if (targetPoints > nextPublicPts) {
+          publicNeedsFollowUp = true;
+        }
+
+        const publicPayload = this.buildPublicLeaderboardPayload({
+          uid,
+          playerId:
+            typeof publicData.playerId === 'string' && publicData.playerId.length === 10
+              ? publicData.playerId
+              : safePlayerId,
+          username: finalUsername,
+          usernameNormalized: finalUsernameNorm,
+          countryCode: finalCountryCode,
+          countryName: finalCountryName,
+          countryFlag: finalCountryFlag,
+          monthlyRoundPoints: nextPublicPts,
+          level: safeLevel,
+          rankTitle: safeRankTitle,
+          rankTitleEn: safeRankTitleEn,
+          vipTier: lockedPublicVipTier,
+          updatedAtMs: nowMs,
+          currentMonthKey: effectivePublicMonthKey,
+          lastPointsAt: publicPointsIncreased
+            ? serverTimestamp()
+            : publicData.lastPointsAt !== undefined && publicData.lastPointsAt !== null
+            ? publicData.lastPointsAt
+            : undefined,
+        });
+
+        activeOpPath = `leaderboard_public/${uid}`;
+        activeOpType = OperationType.UPDATE;
+        await globalErrorHandler.withSafeRetry(() => setDoc(publicRef, publicPayload));
+        if (publicPointsIncreased) {
+          this.lastPublicPointsWriteAtMs = Date.now();
+        }
+      }
+
+      // Schedule automatic follow-up sync if any points or coins remain queued behind cooldown/caps
+      const remainingPoints = targetPoints > nextPlayerPts || publicNeedsFollowUp;
+      const remainingCoins = targetCoins > nextCoins;
+      if (remainingPoints || remainingCoins) {
+        const waitMs = remainingPoints ? 9000 : 2500;
+        this.scheduleFollowUpSync(waitMs);
+      }
+
+      // Update username reservation ONLY when the player explicitly changed their username
+      if (
+        allowIdentityMutation &&
+        oldUsernameNormalized &&
+        oldUsernameNormalized !== finalUsernameNorm
+      ) {
         try {
           await deleteDoc(doc(db, 'usernames', oldUsernameNormalized));
         } catch {
           // ignore if old reservation didn't exist
         }
+        try {
+          const newUsernameRef = doc(db, 'usernames', finalUsernameNorm);
+          const existingNameSnap = await getDoc(newUsernameRef);
+          if (!existingNameSnap.exists() || existingNameSnap.data()?.uid === uid) {
+            await setDoc(newUsernameRef, {
+              uid,
+              username: finalUsername,
+              playerId: safePlayerId,
+              createdAt: nowMs,
+              reservedAtMs: nowMs,
+            });
+          }
+        } catch (uErr) {
+          handleFirestoreError(
+            uErr,
+            OperationType.WRITE,
+            `usernames/${finalUsernameNorm}`,
+            false,
+            'sync'
+          );
+        }
       }
-      await setDoc(doc(db, 'usernames', cleanNormName), {
-        uid,
-        username: cleanUsername,
-        playerId: cloudData.playerId || profile.playerId,
-        createdAt: nowMs,
-        reservedAtMs: nowMs,
-      });
 
       this.setCloudStatus(true, null, false);
     } catch (error) {
       const formatted = formatFirebaseAuthOrFirestoreError(
         error,
-        profile.settings?.language || 'ar'
+        profile.settings?.language || 'ar',
+        'sync'
       );
       this.setCloudStatus(false, formatted, isNetworkConnectivityError(error));
-      handleFirestoreError(error, OperationType.WRITE, 'players/sync');
+      handleFirestoreError(error, activeOpType, activeOpPath, false, 'sync');
       if (throwOnError) {
         throw error;
       }
@@ -1233,15 +1612,13 @@ export class StorageRepository {
           ok: false,
           error:
             params.lang === 'en'
-              ? 'This username is already taken in the cloud. Please choose another username.'
-              : 'اسم المستخدم هذا محجوز بالفعل في قاعدة البيانات السحابية. يرجى اختيار اسم آخر.',
+              ? 'This username is already taken. Please choose another username.'
+              : 'هذا الاسم مستخدم بالفعل، يرجى اختيار اسم آخر.',
         };
       }
     } catch (err) {
-      // If reading usernames fails due to network or rules, surface if permission-denied or offline
-      const errMsg = err instanceof Error ? err.message.toLowerCase() : '';
       if (isNetworkConnectivityError(err)) {
-        const formatted = formatFirebaseAuthOrFirestoreError(err, params.lang);
+        const formatted = formatFirebaseAuthOrFirestoreError(err, params.lang, 'auth');
         this.setCloudStatus(false, formatted, true);
         return { ok: false, error: formatted };
       }
@@ -1269,8 +1646,8 @@ export class StorageRepository {
           ok: false,
           error:
             params.lang === 'en'
-              ? 'Invalid international phone format. Must adhere to E.164 (+CountryCode + SubscriberNumber) to transform to phone_xxx@neurox.app.'
-              : 'صيغة رقم الجوال الدولية غير صحيحة. يجب أن يطابق المعيار الدولي (+مفتاح الدولة متبوعاً برقم الجوال) للتحويل إلى phone_xxx@neurox.app.',
+              ? 'Invalid phone number format. Please check your country code and mobile number.'
+              : 'صيغة رقم الجوال غير صحيحة. يرجى التأكد من مفتاح الدولة ورقم الجوال.',
         };
       }
 
@@ -1359,9 +1736,15 @@ export class StorageRepository {
       this.setCloudStatus(true, null);
       return { ok: true, profile: saved };
     } catch (error) {
-      const formatted = formatFirebaseAuthOrFirestoreError(error, params.lang);
-      this.setCloudStatus(false, formatted);
-      return { ok: false, error: formatted };
+      const { userMessage } = globalErrorHandler.recordAndFormat({
+        error,
+        category: 'auth',
+        operation: 'register_account',
+        path: 'auth/register',
+        lang: params.lang,
+      });
+      this.setCloudStatus(false, userMessage, isNetworkConnectivityError(error));
+      return { ok: false, error: userMessage };
     }
   }
 
@@ -1398,8 +1781,8 @@ export class StorageRepository {
           ok: false,
           error:
             params.lang === 'en'
-              ? 'Invalid international phone format. Must adhere to E.164 (+CountryCode + SubscriberNumber) to transform to phone_xxx@neurox.app.'
-              : 'صيغة رقم الجوال الدولية غير صحيحة. يجب أن يطابق المعيار الدولي (+مفتاح الدولة متبوعاً برقم الجوال) للتحويل إلى phone_xxx@neurox.app.',
+              ? 'Invalid phone number format. Please check your country code and mobile number.'
+              : 'صيغة رقم الجوال غير صحيحة. يرجى التأكد من مفتاح الدولة ورقم الجوال.',
         };
       }
 
@@ -1536,9 +1919,15 @@ export class StorageRepository {
       this.setCloudStatus(true, null);
       return { ok: true, profile: saved };
     } catch (error) {
-      const formatted = formatFirebaseAuthOrFirestoreError(error, params.lang);
-      this.setCloudStatus(false, formatted);
-      return { ok: false, error: formatted };
+      const { userMessage } = globalErrorHandler.recordAndFormat({
+        error,
+        category: 'auth',
+        operation: 'login_account',
+        path: 'auth/login',
+        lang: params.lang,
+      });
+      this.setCloudStatus(false, userMessage, isNetworkConnectivityError(error));
+      return { ok: false, error: userMessage };
     }
   }
 
@@ -1570,9 +1959,16 @@ export class StorageRepository {
             : `تم إرسال رابط إعادة تعيين كلمة المرور إلى ${cleanEmail} بنجاح. يرجى تفقد صندوق الوارد أو الرسائل غير المرغوب فيها (Spam).`,
       };
     } catch (error) {
+      const { userMessage } = globalErrorHandler.recordAndFormat({
+        error,
+        category: 'auth',
+        operation: 'reset_password',
+        path: 'auth/reset_password',
+        lang,
+      });
       return {
         ok: false,
-        error: formatFirebaseAuthOrFirestoreError(error, lang),
+        error: userMessage,
       };
     }
   }
@@ -2025,10 +2421,10 @@ export class StorageRepository {
       await setDoc(myReqRef, newRequest);
       return { ok: true, status: 'sent', targetUsername: target.username };
     } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, 'friend_requests');
+      handleFirestoreError(err, OperationType.CREATE, 'friend_requests', false, 'friends');
       return {
         ok: false,
-        error: formatFirebaseAuthOrFirestoreError(err, lang),
+        error: formatFirebaseAuthOrFirestoreError(err, lang, 'friends'),
       };
     }
   }
@@ -2158,10 +2554,16 @@ export class StorageRepository {
 
       return { ok: true, friend: newFriend };
     } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, `friend_requests/${request.id}/accept`);
+      handleFirestoreError(
+        err,
+        OperationType.WRITE,
+        `friend_requests/${request.id}/accept`,
+        false,
+        'friends'
+      );
       return {
         ok: false,
-        error: formatFirebaseAuthOrFirestoreError(err, lang),
+        error: formatFirebaseAuthOrFirestoreError(err, lang, 'friends'),
       };
     }
   }
@@ -2179,10 +2581,16 @@ export class StorageRepository {
       await deleteDoc(doc(db, 'friend_requests', requestId));
       return { ok: true };
     } catch (err) {
-      handleFirestoreError(err, OperationType.DELETE, `friend_requests/${requestId}`);
+      handleFirestoreError(
+        err,
+        OperationType.DELETE,
+        `friend_requests/${requestId}`,
+        false,
+        'friends'
+      );
       return {
         ok: false,
-        error: formatFirebaseAuthOrFirestoreError(err, lang),
+        error: formatFirebaseAuthOrFirestoreError(err, lang, 'friends'),
       };
     }
   }
@@ -2693,10 +3101,16 @@ export class StorageRepository {
 
       return { ok: true, message: localMessage };
     } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, `chats/${chatId}/messages/${msgId}`);
+      handleFirestoreError(
+        err,
+        OperationType.CREATE,
+        `chats/${chatId}/messages/${msgId}`,
+        false,
+        'chat'
+      );
       return {
         ok: false,
-        error: formatFirebaseAuthOrFirestoreError(err, lang),
+        error: formatFirebaseAuthOrFirestoreError(err, lang, 'chat'),
       };
     }
   }
@@ -2793,8 +3207,8 @@ export class StorageRepository {
         onUpdateMessages(cloudMsgs);
       },
       (error) => {
-        handleFirestoreError(error, OperationType.LIST, `chats/${chatId}/messages`);
-        onError?.(formatFirebaseAuthOrFirestoreError(error, lang));
+        handleFirestoreError(error, OperationType.LIST, `chats/${chatId}/messages`, false, 'chat');
+        onError?.(formatFirebaseAuthOrFirestoreError(error, lang, 'chat'));
       }
     );
   }

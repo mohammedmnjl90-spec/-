@@ -593,8 +593,8 @@ export const FriendsAndChatView: React.FC<FriendsAndChatViewProps> = ({
               <span>
                 {tr(
                   lang,
-                  'إشعارات صداقة فورية · دردشة مباشرة لحظية عبر السحابة',
-                  'Real-Time Friend Requests · Instant Cloud Messaging'
+                  'إشعارات صداقة فورية · دردشة مباشرة ولحظية مع أصدقائك',
+                  'Real-Time Friend Requests · Instant Messaging With Friends'
                 )}
               </span>
             </div>

@@ -314,6 +314,8 @@ service cloud.firestore {
         && data.lastProfileEditAt >= 0
         && data.updatedAtMs is int
         && data.updatedAtMs >= 0
+        && (!('lastPointsAt' in data) || data.lastPointsAt is timestamp)
+        && (!('currentMonthKey' in data) || (data.currentMonthKey is string && data.currentMonthKey.matches('^[0-9]{4}-[0-9]{2}$')))
         && hasValidOptionalContact(data);
     }
 
@@ -364,21 +366,62 @@ service cloud.firestore {
         && data.rankTitle.size() <= 40
         && data.vipTier in ['none', 'bronze', 'silver', 'gold', 'legend']
         && data.updatedAtMs is int
-        && data.updatedAtMs >= 0;
+        && data.updatedAtMs >= 0
+        && (!('lastPointsAt' in data) || data.lastPointsAt is timestamp)
+        && (!('currentMonthKey' in data) || (data.currentMonthKey is string && data.currentMonthKey.matches('^[0-9]{4}-[0-9]{2}$')));
     }
 
-    // التحقق من عدم تجاوز الحد الأقصى لزيادة النقاط (+2 نقطة فقط في التحديث الواحد للجولة)
+    // التحقق من عدم حذف أو إرجاع مفتاح الشهر للخلف بعد تعيينه
+    function isValidMonthKeyTransition() {
+      return !('currentMonthKey' in existing())
+        || (
+          ('currentMonthKey' in incoming())
+          && incoming().currentMonthKey is string
+          && incoming().currentMonthKey.matches('^[0-9]{4}-[0-9]{2}$')
+          && incoming().currentMonthKey >= existing().currentMonthKey
+        );
+    }
+
+    // التحقق من انتقال الشهر الميلادي بشكل نظامي لتصفير نقاط الشهر الجديد بأمان
+    function isNewMonthReset() {
+      return ('currentMonthKey' in existing())
+        && existing().currentMonthKey is string
+        && ('currentMonthKey' in incoming())
+        && incoming().currentMonthKey is string
+        && incoming().currentMonthKey.matches('^[0-9]{4}-[0-9]{2}$')
+        && incoming().currentMonthKey > existing().currentMonthKey;
+    }
+
+    // التحقق من عدم تجاوز الحد الأقصى لزيادة النقاط (+2 نقطة فقط في التحديث الواحد للجولة) أو التصفير النظامي لبداية شهر جديد
     function isValidPointsDelta() {
-      return incoming().monthlyRoundPoints >= existing().monthlyRoundPoints
-        && (incoming().monthlyRoundPoints - existing().monthlyRoundPoints) <= 2;
+      return isValidMonthKeyTransition() && (
+        (
+          incoming().monthlyRoundPoints >= existing().monthlyRoundPoints
+          && (incoming().monthlyRoundPoints - existing().monthlyRoundPoints) <= 2
+        ) || (
+          isNewMonthReset()
+          && incoming().monthlyRoundPoints >= 0
+          && incoming().monthlyRoundPoints <= 2
+        )
+      );
     }
 
-    // منع تكرار إرسال تحديثات النقاط الوهمية (Rate Limiting: فاصل 25 ثانية على الأقل بين كل تحديث جولة وآخر)
+    // منع تكرار إرسال تحديثات النقاط الوهمية باستخدام ختم وقت الخادم الحقيقي (lastPointsAt == request.time) بفاصل 8 ثوانٍ على الأقل
     function isValidPointsRateLimit() {
-      let pointsIncreased = incoming().monthlyRoundPoints > existing().monthlyRoundPoints;
+      let pointsIncreased = (
+        !isNewMonthReset()
+        && incoming().monthlyRoundPoints > existing().monthlyRoundPoints
+      ) || (
+        isNewMonthReset()
+        && incoming().monthlyRoundPoints > 0
+      );
       return !pointsIncreased || (
-        incoming().updatedAtMs == request.time.toMillis()
-        && (request.time.toMillis() - existing().updatedAtMs) >= 25000
+        ('lastPointsAt' in incoming())
+        && incoming().lastPointsAt == request.time
+        && (
+          !('lastPointsAt' in existing())
+          || request.time >= existing().lastPointsAt + duration.value(8, 's')
+        )
       );
     }
 
@@ -425,7 +468,7 @@ service cloud.firestore {
         && incoming().coins <= 100
         && incoming().fairPlayScore == 100;
 
-      // تحديث بيانات اللاعب مع قفل تعديل vipTier و adsRemoved من العميل وفرض Rate Limiting (25 ثانية)
+      // تحديث بيانات اللاعب مع قفل تعديل vipTier و adsRemoved من العميل وفرض Rate Limiting (8 ثوانٍ بوقت الخادم)
       allow update: if isOwner(uid)
         && isValidId(uid)
         && isValidPlayerShape(incoming(), uid)
@@ -453,8 +496,14 @@ service cloud.firestore {
       allow create: if isOwner(uid)
         && isValidId(uid)
         && isValidPublicLeaderboardShape(incoming(), uid)
-        && incoming().vipTier == 'none'
-        && incoming().monthlyRoundPoints <= 2;
+        && (
+          (incoming().vipTier == 'none' && incoming().monthlyRoundPoints <= 2)
+          || (
+            exists(/databases/$(database)/documents/players/$(uid))
+            && incoming().vipTier == get(/databases/$(database)/documents/players/$(uid)).data.vipTier
+            && incoming().monthlyRoundPoints == get(/databases/$(database)/documents/players/$(uid)).data.monthlyRoundPoints
+          )
+        );
 
       allow update: if isOwner(uid)
         && isValidId(uid)

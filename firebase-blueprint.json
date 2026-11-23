@@ -50,7 +50,7 @@
         },
         "monthlyRoundPoints": {
           "type": "number",
-          "description": "Official monthly leaderboard points (max +2 per single round update, 25s rate limit)"
+          "description": "Official monthly leaderboard points (max +2 per single round update, 8s server-timestamp rate limit)"
         },
         "coins": {
           "type": "number",
@@ -89,7 +89,17 @@
         },
         "updatedAtMs": {
           "type": "number",
-          "description": "Server timestamp in milliseconds used for 25-second points rate limiting"
+          "description": "Client update timestamp in milliseconds"
+        },
+        "lastPointsAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Firestore serverTimestamp() recorded whenever monthlyRoundPoints increases (enforces 8-second anti-cheat cooldown)"
+        },
+        "currentMonthKey": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}$",
+          "description": "Active YYYY-MM competition month key for legitimate monthly score resets"
         }
       },
       "required": [
@@ -168,6 +178,16 @@
         },
         "updatedAtMs": {
           "type": "number"
+        },
+        "lastPointsAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Firestore serverTimestamp() recorded whenever monthlyRoundPoints increases"
+        },
+        "currentMonthKey": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}$",
+          "description": "Active YYYY-MM competition month key"
         }
       },
       "required": [
