@@ -36,7 +36,7 @@ import {
   VipPurchaseReceipt,
   VipTier,
 } from '../types/game';
-import { COUNTRIES_LIST } from '../data/countries';
+import { COUNTRIES_LIST, getCountryByCode } from '../data/countries';
 import { detectInitialLanguage } from '../utils/i18n';
 import {
   auth,
@@ -147,7 +147,7 @@ export const SIMULATED_COMPETITORS: LeaderboardEntry[] = [
   {
     playerId: '9841205731',
     username: 'صقر_الجزيرة',
-    country: COUNTRIES_LIST[1], // Saudi Arabia
+    country: getCountryByCode('SA'), // Saudi Arabia
     monthlyPoints: 64,
     level: 14,
     rankTitle: 'علامة الميدان',
@@ -157,7 +157,7 @@ export const SIMULATED_COMPETITORS: LeaderboardEntry[] = [
   {
     playerId: '7410928364',
     username: 'النابغة_المصري',
-    country: COUNTRIES_LIST[2], // Egypt
+    country: getCountryByCode('EG'), // Egypt
     monthlyPoints: 58,
     level: 13,
     rankTitle: 'علامة الميدان',
@@ -167,7 +167,7 @@ export const SIMULATED_COMPETITORS: LeaderboardEntry[] = [
   {
     playerId: '6301948271',
     username: 'فارس_الإمارات',
-    country: COUNTRIES_LIST[3], // UAE
+    country: getCountryByCode('AE'), // UAE
     monthlyPoints: 51,
     level: 11,
     rankTitle: 'حكيم المعرفة',
@@ -177,7 +177,7 @@ export const SIMULATED_COMPETITORS: LeaderboardEntry[] = [
   {
     playerId: '5192837465',
     username: 'نجم_اليمن',
-    country: COUNTRIES_LIST[0], // Yemen
+    country: getCountryByCode('YE'), // Yemen
     monthlyPoints: 45,
     level: 10,
     rankTitle: 'حكيم المعرفة',
@@ -187,7 +187,7 @@ export const SIMULATED_COMPETITORS: LeaderboardEntry[] = [
   {
     playerId: '4081726359',
     username: 'درع_الشام',
-    country: COUNTRIES_LIST[7], // Jordan
+    country: getCountryByCode('JO'), // Jordan
     monthlyPoints: 39,
     level: 9,
     rankTitle: 'خبير متمرس',
@@ -197,7 +197,7 @@ export const SIMULATED_COMPETITORS: LeaderboardEntry[] = [
   {
     playerId: '3918273645',
     username: 'أسد_الأطلس',
-    country: COUNTRIES_LIST[12], // Morocco
+    country: getCountryByCode('MA'), // Morocco
     monthlyPoints: 32,
     level: 8,
     rankTitle: 'خبير متمرس',
@@ -207,7 +207,7 @@ export const SIMULATED_COMPETITORS: LeaderboardEntry[] = [
   {
     playerId: '2837465910',
     username: 'نور_الرافدين',
-    country: COUNTRIES_LIST[8], // Iraq
+    country: getCountryByCode('IQ'), // Iraq
     monthlyPoints: 26,
     level: 7,
     rankTitle: 'مثقف متألق',
@@ -217,7 +217,7 @@ export const SIMULATED_COMPETITORS: LeaderboardEntry[] = [
   {
     playerId: '1928374650',
     username: 'فخر_الكويت',
-    country: COUNTRIES_LIST[4], // Kuwait
+    country: getCountryByCode('KW'), // Kuwait
     monthlyPoints: 19,
     level: 6,
     rankTitle: 'مثقف متألق',
@@ -227,7 +227,7 @@ export const SIMULATED_COMPETITORS: LeaderboardEntry[] = [
   {
     playerId: '8172635490',
     username: 'شعلة_الجزائر',
-    country: COUNTRIES_LIST[13], // Algeria
+    country: getCountryByCode('DZ'), // Algeria
     monthlyPoints: 14,
     level: 5,
     rankTitle: 'باحث طموح',
@@ -237,7 +237,7 @@ export const SIMULATED_COMPETITORS: LeaderboardEntry[] = [
   {
     playerId: '6758493021',
     username: 'نسر_تونس',
-    country: COUNTRIES_LIST[14], // Tunisia
+    country: getCountryByCode('TN'), // Tunisia
     monthlyPoints: 8,
     level: 4,
     rankTitle: 'باحث طموح',
@@ -247,7 +247,7 @@ export const SIMULATED_COMPETITORS: LeaderboardEntry[] = [
   {
     playerId: '5544332211',
     username: 'سلطان_عمان',
-    country: COUNTRIES_LIST[6], // Oman
+    country: getCountryByCode('OM'), // Oman
     monthlyPoints: 4,
     level: 3,
     rankTitle: 'مبتدئ واعد',

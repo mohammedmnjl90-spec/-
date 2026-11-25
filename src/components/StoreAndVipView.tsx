@@ -169,13 +169,13 @@ const VIP_IAP_PACKAGES: VipIapPackageCard[] = [
     bonusCoins: 150,
     bonusLifelinesEach: 2,
     perksAr: [
-      'إزالة جميع الإعلانات (بما فيها إعلان الساعة) نهائياً',
+      'إزالة جميع الإعلانات نهائياً لتجربة لعب متواصلة',
       '+150 عملة ذهبية فورية + 2 من كل وسيلة مساعدة',
       'شارة التاج 👑 بجانب اسمك في التطبيق وقائمة المتصدرين',
       '+1 عملة إضافية لكل نقطة رسمية ومضاعفة عجلة الحظ 1.2×',
     ],
     perksEn: [
-      'Remove all ads (including hourly ads) permanently',
+      'Remove all ads permanently for uninterrupted play',
       '+150 instant Gold Coins + 2 of each lifeline',
       'Crown badge 👑 next to your name across the app & leaderboard',
       '+1 bonus coin per official point & 1.2× Daily Spin multiplier',
@@ -194,13 +194,13 @@ const VIP_IAP_PACKAGES: VipIapPackageCard[] = [
     bonusCoins: 350,
     bonusLifelinesEach: 4,
     perksAr: [
-      'إزالة جميع الإعلانات (بما فيها إعلان الساعة) نهائياً',
+      'إزالة جميع الإعلانات نهائياً لتجربة لعب متواصلة',
       '+350 عملة ذهبية فورية + 4 من كل وسيلة مساعدة',
       'شارة التاج الفضي 👑 بجانب اسمك في التطبيق وقائمة المتصدرين',
       '+2 عملة إضافية لكل نقطة رسمية ومضاعفة عجلة الحظ 1.5×',
     ],
     perksEn: [
-      'Remove all ads (including hourly ads) permanently',
+      'Remove all ads permanently for uninterrupted play',
       '+350 instant Gold Coins + 4 of each lifeline',
       'Silver Crown badge 👑 next to your name across the app',
       '+2 bonus coins per official point & 1.5× Daily Spin multiplier',
@@ -219,13 +219,13 @@ const VIP_IAP_PACKAGES: VipIapPackageCard[] = [
     bonusCoins: 750,
     bonusLifelinesEach: 7,
     perksAr: [
-      'إزالة جميع الإعلانات (بما فيها إعلان الساعة) نهائياً',
+      'إزالة جميع الإعلانات نهائياً لتجربة لعب متواصلة',
       '+750 عملة ذهبية فورية + 7 من كل وسيلة مساعدة',
       'شارة التاج الذهبي الملكي 👑 بجانب اسمك في كل مكان',
       '+4 عملات إضافية لكل نقطة رسمية ومضاعفة عجلة الحظ 2×',
     ],
     perksEn: [
-      'Remove all ads (including hourly ads) permanently',
+      'Remove all ads permanently for uninterrupted play',
       '+750 instant Gold Coins + 7 of each lifeline',
       'Royal Gold Crown badge 👑 next to your name everywhere',
       '+4 bonus coins per official point & 2× Daily Spin multiplier',
@@ -802,7 +802,7 @@ export const StoreAndVipView: React.FC<StoreAndVipViewProps> = ({
 
               <div className="pt-2 border-t border-slate-800/80 space-y-1.5 text-xs text-emerald-300">
                 <div>
-                  ✓ {tr(lang, 'إزالة جميع الإعلانات نهائياً (بما فيها إعلان الساعة)', 'Permanent removal of all ads (including hourly ad)')}
+                  ✓ {tr(lang, 'إزالة جميع الإعلانات نهائياً', 'Permanent removal of all ads')}
                 </div>
                 <div>
                   ✓ {tr(

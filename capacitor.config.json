@@ -1,8 +1,28 @@
 {
   "appId": "com.midan.almarifa",
-  "appName": "ميدان المعرفة",
+  "appName": "قمة التحدي",
   "webDir": "dist",
+  "backgroundColor": "#080C16",
   "server": {
     "androidScheme": "https"
+  },
+  "android": {
+    "allowMixedContent": false,
+    "captureInput": true,
+    "webContentsDebuggingEnabled": false
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 1800,
+      "launchAutoHide": true,
+      "backgroundColor": "#080C16",
+      "androidSplashResourceName": "splash",
+      "androidScaleType": "CENTER_CROP",
+      "showSpinner": false
+    },
+    "StatusBar": {
+      "style": "DARK",
+      "backgroundColor": "#080C16"
+    }
   }
 }

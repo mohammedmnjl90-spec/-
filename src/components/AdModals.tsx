@@ -35,7 +35,7 @@ export const InterstitialAdModal: React.FC<InterstitialAdModalProps> = ({
         <div className="flex items-center justify-between border-b border-slate-800 pb-3">
           <span className="text-xs font-extrabold text-cyan-400 flex items-center gap-1.5">
             <Tv className="w-4 h-4" />
-            <span>{tr(lang, 'إعلان الساعة البيني', 'Hourly Interstitial Ad')}</span>
+            <span>{tr(lang, 'استراحة إعلانية قصيرة', 'Short Sponsored Break')}</span>
           </span>
 
           {secondsLeft > 0 ? (
@@ -71,8 +71,8 @@ export const InterstitialAdModal: React.FC<InterstitialAdModalProps> = ({
           <p className="text-xs text-slate-300 leading-relaxed">
             {tr(
               lang,
-              'لقد أتممت ساعة كاملة من اللعب النشط. اشترك في أي باقة VIP لإزالة جميع الإعلانات نهائياً والحصول على عملات ومساعدات فورية!',
-              'You completed a full hour of active play. Upgrade to any VIP package to remove all ads permanently and claim instant coins & lifelines!'
+              'اشترك في أي باقة VIP لإزالة جميع الإعلانات نهائياً والاستمتاع بتجربة لعب متواصلة مع عملات ومساعدات فورية!',
+              'Upgrade to any VIP package to remove all ads permanently and enjoy uninterrupted play with instant coins & lifelines!'
             )}
           </p>
         </div>

@@ -33,6 +33,7 @@ export interface QuestionItem {
   question: string;
   options: [string, string, string, string];
   correctAnswer: string;
+  difficulty?: 1 | 2 | 3;
 }
 
 export interface CountryInfo {

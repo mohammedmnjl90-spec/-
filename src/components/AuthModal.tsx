@@ -109,7 +109,7 @@ export function validateAndTransformPhoneForAuth(
 
   if (!subscriberDigits) {
     const rule = COUNTRY_PHONE_RULES[dialCode];
-    const example = rule ? `${dialCode}${rule.exampleLocal}` : `${dialCode}770000000`;
+    const example = rule ? `${dialCode}${rule.exampleLocal}` : `${dialCode}500000000`;
     return {
       valid: false,
       error: tr(

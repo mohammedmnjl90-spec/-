@@ -18,7 +18,7 @@ import {
   UserPresence,
   VipTier,
 } from './types/game';
-import { CATEGORIES } from './data/questions';
+import { CATEGORIES, getDifficultyTierForPoints } from './data/questions';
 import {
   calculateLevelAndRank,
   CloudSyncStatus,
@@ -1909,6 +1909,22 @@ export default function App() {
                 <h2 className="text-xl md:text-2xl font-black text-white">
                   {tr(lang, 'اختر القسم وابدأ التحدي', 'Choose a Category & Start Playing')}
                 </h2>
+                {(() => {
+                  const tier = getDifficultyTierForPoints(profile.monthlyPoints);
+                  return (
+                    <p className="text-xs sm:text-sm font-bold text-slate-400">
+                      <span className={tier.accentClass}>
+                        {lang === 'en' ? tier.labelEn : tier.labelAr}
+                      </span>
+                      {' · '}
+                      {tr(
+                        lang,
+                        'تزداد صعوبة الأسئلة تلقائياً مع ارتفاع نقاطك',
+                        'Question difficulty scales up automatically with your points'
+                      )}
+                    </p>
+                  );
+                })()}
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">

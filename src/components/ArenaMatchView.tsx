@@ -6,7 +6,7 @@ import {
   PlayerProfile,
   QuestionItem,
 } from '../types/game';
-import { selectMatchQuestions } from '../data/questions';
+import { getDifficultyTierForPoints, selectMatchQuestions } from '../data/questions';
 import { getVipMultiplier } from '../services/storageRepository';
 import { soundEngine } from '../utils/sound';
 import { getCategoryName, tr } from '../utils/i18n';
@@ -81,7 +81,13 @@ export const ArenaMatchView: React.FC<ArenaMatchViewProps> = ({
   onExitArena,
 }) => {
   const [matchQuestions, setMatchQuestions] = useState<QuestionItem[]>(() =>
-    selectMatchQuestions(category.id, profile.recentlyPlayedQuestionIds, 18, lang)
+    selectMatchQuestions(
+      category.id,
+      profile.recentlyPlayedQuestionIds,
+      18,
+      lang,
+      profile.monthlyPoints
+    )
   );
 
   const [stage, setStage] = useState<'playing_question' | 'round_summary' | 'match_summary'>(
@@ -129,6 +135,7 @@ export const ArenaMatchView: React.FC<ArenaMatchViewProps> = ({
   const coinsPerOfficialPoint = 5 + vipInfo.coinBonusPerOfficialPoint;
 
   const categoryDisplayName = getCategoryName(category, lang);
+  const activeDifficultyTier = getDifficultyTierForPoints(profile.monthlyPoints);
 
   useEffect(() => {
     isPausedByNetworkRef.current = isPausedByNetwork;
@@ -477,7 +484,13 @@ export const ArenaMatchView: React.FC<ArenaMatchViewProps> = ({
     soundEngine.playClick();
     remainingMsRef.current = QUESTION_TIME_LIMIT * 1000;
     setMatchQuestions(
-      selectMatchQuestions(category.id, profile.recentlyPlayedQuestionIds, 18, lang)
+      selectMatchQuestions(
+        category.id,
+        profile.recentlyPlayedQuestionIds,
+        18,
+        lang,
+        profile.monthlyPoints
+      )
     );
     setCurrentRound(1);
     setQuestionIndexInRound(0);
@@ -825,6 +838,10 @@ export const ArenaMatchView: React.FC<ArenaMatchViewProps> = ({
               </div>
               <div className="text-[11px] font-semibold text-slate-400 truncate">
                 {categoryDisplayName}
+                <span className={`font-bold ${activeDifficultyTier.accentClass}`}>
+                  {' '}
+                  · {lang === 'en' ? activeDifficultyTier.labelEn : activeDifficultyTier.labelAr}
+                </span>
                 {comboStreak >= 2 && (
                   <span className="text-amber-400 font-bold">
                     {' '}
