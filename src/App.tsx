@@ -183,6 +183,13 @@ export default function App() {
 
   const activeChatFriendUidRef = useRef<string | null>(null);
   const activeTabRef = useRef<MainTab>(activeTab);
+  const openModalRef = useRef(openModal);
+  const profileRef = useRef<PlayerProfile | null>(profile);
+  const activePlaySecondsRef = useRef<number>(profile?.activePlaySeconds || 0);
+  const lastVerifiedOnlineAtRef = useRef<number>(0);
+  const wasOfflineRef = useRef<boolean>(false);
+  const [isVerifyingMatchConnection, setIsVerifyingMatchConnection] = useState<boolean>(false);
+
   const seenIncomingReqIdsRef = useRef<Set<string>>(new Set());
   const initializedReqsRef = useRef<boolean>(false);
   const seenFriendUidsRef = useRef<Set<string>>(new Set());
@@ -195,12 +202,56 @@ export default function App() {
     activeTabRef.current = activeTab;
   }, [activeTab]);
 
-  // Keep authUid synchronized with Firebase Auth session restoration / login / logout
   useEffect(() => {
+    openModalRef.current = openModal;
+  }, [openModal]);
+
+  useEffect(() => {
+    profileRef.current = profile;
+    if (profile && typeof profile.activePlaySeconds === 'number') {
+      activePlaySecondsRef.current = Math.max(
+        activePlaySecondsRef.current,
+        profile.activePlaySeconds
+      );
+    }
+  }, [profile]);
+
+  // Keep authUid synchronized AND immediately hydrate authoritative cloud profile (username, points, country)
+  // whenever Firebase Auth signs in or restores a session — unified single source of truth across all views!
+  useEffect(() => {
+    let active = true;
     const unsubAuth = onAuthStateChanged(auth, (user) => {
-      setAuthUid(user?.uid ?? null);
+      const nextUid = user?.uid ?? null;
+      setAuthUid(nextUid);
+
+      if (!nextUid) return;
+
+      const currentLocal = profileRef.current;
+      const needsHydration =
+        !currentLocal ||
+        currentLocal.uid !== nextUid ||
+        !currentLocal.username ||
+        currentLocal.username.trim().length < 2;
+
+      void storageRepo
+        .hydrateProfileFromCloud(nextUid, currentLocal)
+        .then((hydrated) => {
+          if (!active || !hydrated) return;
+          if (
+            needsHydration ||
+            !currentLocal ||
+            hydrated.username !== currentLocal.username ||
+            hydrated.monthlyPoints !== currentLocal.monthlyPoints ||
+            hydrated.coins !== currentLocal.coins
+          ) {
+            setProfile(hydrated);
+          }
+        });
     });
-    return () => unsubAuth();
+    return () => {
+      active = false;
+      unsubAuth();
+    };
   }, []);
 
   const showSocialToast = useCallback(
@@ -228,6 +279,7 @@ export default function App() {
         typeof navigator !== 'undefined' ? navigator.onLine !== false : true;
 
       if (!browserNowOnline) {
+        wasOfflineRef.current = true;
         setIsOnline(false);
         if (isManualRetry) {
           setRetryFailedCount((prev) => prev + 1);
@@ -245,15 +297,43 @@ export default function App() {
       }
 
       try {
-        const check = await testFirestoreConnection(6000);
+        let check = await testFirestoreConnection(6000);
+
+        // 2-strike resilience on background probes: avoid false offline drops from a single slow mobile packet
+        if (!check.connected && !isManualRetry) {
+          await new Promise((resolve) => window.setTimeout(resolve, 1500));
+          const stillBrowserOnline =
+            typeof navigator !== 'undefined' ? navigator.onLine !== false : true;
+          if (stillBrowserOnline) {
+            check = await testFirestoreConnection(6000);
+          }
+        }
+
         if (check.connected) {
+          const recoveredFromOffline = wasOfflineRef.current;
+          wasOfflineRef.current = false;
+          lastVerifiedOnlineAtRef.current = Date.now();
           setIsOnline(true);
           setRetryFailedCount(0);
           storageRepo.setCloudStatus(true, null, false);
-          await ensureFirebaseAuthSession();
+          const sessionUid = await ensureFirebaseAuthSession();
+
+          // On reconnection after weak/dropped internet, flush pending points & refresh cloud truth
+          if (recoveredFromOffline && profileRef.current) {
+            void storageRepo.flushPendingCloudSync(profileRef.current).then(() => {
+              if (sessionUid) {
+                void storageRepo
+                  .hydrateProfileFromCloud(sessionUid, profileRef.current)
+                  .then((hydrated) => {
+                    if (hydrated) setProfile(hydrated);
+                  });
+              }
+            });
+          }
           return true;
         }
 
+        wasOfflineRef.current = true;
         setIsOnline(false);
         if (isManualRetry) {
           setRetryFailedCount((prev) => prev + 1);
@@ -291,6 +371,7 @@ export default function App() {
     };
 
     const handleOffline = () => {
+      wasOfflineRef.current = true;
       setIsOnline(false);
       storageRepo.setCloudStatus(
         false,
@@ -554,10 +635,12 @@ export default function App() {
     };
   }, [authUid, profile?.playerId, isOnline]);
 
-  // Local 15-second freshness ticker so friends whose connection drops expire cleanly to offline after 70s
+  // Local 15-second freshness ticker ONLY when Friends tab is active (prevents unnecessary global re-renders)
   useEffect(() => {
     const ticker = window.setInterval(() => {
-      setPresenceNowMs(Date.now());
+      if (activeTabRef.current === 'friends') {
+        setPresenceNowMs(Date.now());
+      }
     }, 15000);
     return () => window.clearInterval(ticker);
   }, []);
@@ -615,58 +698,60 @@ export default function App() {
     saveLanguagePreference(lang);
   }, [lang]);
 
-  useEffect(() => {
-    if (profile) {
-      soundEngine.configure(
-        profile.settings.soundEnabled,
-        profile.settings.vibrationEnabled
-      );
-      if (profile.settings.language && profile.settings.language !== lang) {
-        setLang(profile.settings.language);
-      }
-    }
-  }, [profile, lang]);
+  const soundEnabled = profile?.settings.soundEnabled;
+  const vibrationEnabled = profile?.settings.vibrationEnabled;
+  const profileLangSetting = profile?.settings.language;
+  const hasProfile = Boolean(profile);
+  const hasActiveMatch = Boolean(activeMatchCategory);
 
-  // Track active playtime every second (only while genuinely online) to trigger Hourly Interstitial Ad for non-VIP players
   useEffect(() => {
-    if (showSplash || !profile || isAppClosed || !isOnline) return;
+    if (soundEnabled !== undefined && vibrationEnabled !== undefined) {
+      soundEngine.configure(soundEnabled, vibrationEnabled);
+    }
+    if (profileLangSetting && profileLangSetting !== lang) {
+      setLang(profileLangSetting);
+    }
+  }, [soundEnabled, vibrationEnabled, profileLangSetting, lang]);
+
+  // Track active playtime via a Ref (ZERO 1-second React state churn / ZERO input disruption!)
+  useEffect(() => {
+    if (showSplash || !hasProfile || isAppClosed || !isOnline) return;
 
     const timer = window.setInterval(() => {
-      setProfile((prev) => {
-        if (!prev) return prev;
-        const nextSeconds = (prev.activePlaySeconds || 0) + 1;
-        const completedHours = Math.floor(nextSeconds / 3600);
-        const isVipOrAdsRemoved = prev.adsRemoved || prev.vipTier !== 'none';
+      const current = profileRef.current;
+      if (!current) return;
+      const nextSeconds = (activePlaySecondsRef.current || current.activePlaySeconds || 0) + 1;
+      activePlaySecondsRef.current = nextSeconds;
 
-        if (!isVipOrAdsRemoved && completedHours > (prev.lastInterstitialHourShown || 0)) {
-          setInterstitialAdPending(true);
-        }
+      const completedHours = Math.floor(nextSeconds / 3600);
+      const isVipOrAdsRemoved = current.adsRemoved || current.vipTier !== 'none';
 
-        const updated: PlayerProfile = {
-          ...prev,
-          activePlaySeconds: nextSeconds,
-        };
-        if (nextSeconds % 10 === 0) {
-          storageRepo.saveProfile(updated, { skipCloudSync: true });
-        }
-        return updated;
-      });
+      if (!isVipOrAdsRemoved && completedHours > (current.lastInterstitialHourShown || 0)) {
+        setInterstitialAdPending(true);
+      }
+
+      if (nextSeconds % 30 === 0) {
+        storageRepo.saveProfile(
+          { ...current, activePlaySeconds: nextSeconds },
+          { skipCloudSync: true }
+        );
+      }
     }, 1000);
 
     return () => window.clearInterval(timer);
-  }, [showSplash, Boolean(profile), isAppClosed, isOnline]);
+  }, [showSplash, hasProfile, isAppClosed, isOnline]);
 
-  // Intercept Hardware Back Button on the Home Screen to show Exit Game confirmation modal
+  // Intercept Hardware Back Button ONCE on Home Screen (never re-push on profile/tab/modal updates!)
   useEffect(() => {
-    if (showSplash || !profile || isAppClosed || activeMatchCategory) return;
+    if (showSplash || !hasProfile || isAppClosed || hasActiveMatch) return;
 
     window.history.pushState({ midanHomeGuard: true }, '');
 
     const handlePopState = () => {
-      if (openModal !== null) {
+      if (openModalRef.current !== null) {
         setOpenModal(null);
         window.history.pushState({ midanHomeGuard: true }, '');
-      } else if (activeTab !== 'arena') {
+      } else if (activeTabRef.current !== 'arena') {
         setActiveTab('arena');
         window.history.pushState({ midanHomeGuard: true }, '');
       } else {
@@ -677,7 +762,7 @@ export default function App() {
 
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
-  }, [showSplash, profile, isAppClosed, activeMatchCategory, openModal, activeTab]);
+  }, [showSplash, hasProfile, isAppClosed, hasActiveMatch]);
 
   const handleToggleLanguage = (nextLang: AppLanguage) => {
     setLang(nextLang);
@@ -696,36 +781,63 @@ export default function App() {
   };
 
   const handleAuthSuccess = (authenticatedProfile: PlayerProfile) => {
+    const resolvedUid = auth.currentUser?.uid || authenticatedProfile.uid || null;
     const updatedWithCurrentLang: PlayerProfile = {
       ...authenticatedProfile,
+      uid: resolvedUid || authenticatedProfile.uid,
       settings: {
         ...authenticatedProfile.settings,
         language: lang,
       },
     };
     const saved = storageRepo.saveProfile(updatedWithCurrentLang, { skipCloudSync: true });
+    activePlaySecondsRef.current = saved.activePlaySeconds || 0;
+    profileRef.current = saved;
+    setAuthUid(resolvedUid);
     setProfile(saved);
     setShowSplash(false);
   };
 
-  const handleSelectCategoryCard = (category: CategoryInfo) => {
-    if (!isOnline) {
-      void verifyOnlineConnectivity(true);
-      return;
+  // Verify live connection readiness BEFORE starting any match
+  const handleSelectCategoryCard = async (category: CategoryInfo) => {
+    if (isVerifyingMatchConnection) return;
+
+    const nowMs = Date.now();
+    const isFreshlyVerified =
+      isOnline && nowMs - lastVerifiedOnlineAtRef.current < 12000;
+
+    if (!isFreshlyVerified) {
+      setIsVerifyingMatchConnection(true);
+      setPressedCategoryId(category.id);
+      const ready = await verifyOnlineConnectivity(true);
+      setIsVerifyingMatchConnection(false);
+      if (!ready) {
+        setPressedCategoryId(null);
+        return;
+      }
     }
+
     soundEngine.playClick();
     setPressedCategoryId(category.id);
     window.setTimeout(() => {
       setPressedCategoryId(null);
       setActiveMatchCategory(category);
-    }, 150);
+    }, 140);
   };
 
-  const handleConfirmLogoutAccount = () => {
-    if (authUid) {
-      void storageRepo.updateMyPresenceAsync(authUid, false);
+  const handleConfirmLogoutAccount = async () => {
+    const closingUid = authUid;
+    if (closingUid) {
+      try {
+        await storageRepo.updateMyPresenceAsync(closingUid, false);
+      } catch {
+        // Non-blocking on logout
+      }
     }
-    storageRepo.logoutCurrentProfile();
+    await storageRepo.logoutCurrentProfileAsync();
+    activePlaySecondsRef.current = 0;
+    profileRef.current = null;
+    setAuthUid(null);
     setOpenModal(null);
     setActiveMatchCategory(null);
     setActiveTab('arena');
@@ -771,32 +883,39 @@ export default function App() {
   };
 
   const handleRoundCompleteAdCheck = useCallback(() => {
-    if (!profile) return;
-    const isVipOrAdsRemoved = profile.adsRemoved || profile.vipTier !== 'none';
-    const completedHours = Math.floor((profile.activePlaySeconds || 0) / 3600);
+    const current = profileRef.current;
+    if (!current) return;
+    const isVipOrAdsRemoved = current.adsRemoved || current.vipTier !== 'none';
+    const currentPlaySecs = Math.max(
+      activePlaySecondsRef.current || 0,
+      current.activePlaySeconds || 0
+    );
+    const completedHours = Math.floor(currentPlaySecs / 3600);
     if (
       !isVipOrAdsRemoved &&
-      (interstitialAdPending || completedHours > (profile.lastInterstitialHourShown || 0))
+      (interstitialAdPending || completedHours > (current.lastInterstitialHourShown || 0))
     ) {
       setInterstitialAdPending(false);
       setShowHourlyInterstitialAd(true);
       const updated: PlayerProfile = {
-        ...profile,
+        ...current,
+        activePlaySeconds: currentPlaySecs,
         lastInterstitialHourShown: Math.max(
           completedHours,
-          (profile.lastInterstitialHourShown || 0) + 1
+          (current.lastInterstitialHourShown || 0) + 1
         ),
       };
       setProfile(storageRepo.saveProfile(updated));
     }
-  }, [profile, interstitialAdPending]);
+  }, [interstitialAdPending]);
 
   const handleRoundCompleteSync = useCallback(
     (
       roundPoints: number,
       roundCoins: number,
       roundXp: number,
-      fairPlayPenalty: number
+      fairPlayPenalty: number,
+      eventKey?: string
     ) => {
       setProfile((prev) => {
         if (!prev) return prev;
@@ -805,7 +924,8 @@ export default function App() {
           roundPoints,
           roundCoins,
           roundXp,
-          fairPlayPenalty
+          fairPlayPenalty,
+          eventKey
         );
       });
     },
@@ -813,6 +933,7 @@ export default function App() {
   );
 
   const handleCompleteMatch = (result: {
+    matchId?: string;
     roundScores: [number, number, number];
     officialPointsEarned: number;
     coinsEarnedInMatch: number;
@@ -1765,8 +1886,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => {
-                    soundEngine.playClick();
-                    setActiveMatchCategory(cocktailCategory);
+                    void handleSelectCategoryCard(cocktailCategory);
                   }}
                   className="p-4 rounded-xl bg-gradient-to-l from-cyan-500/20 to-blue-600/20 border border-cyan-400/50 hover:border-cyan-300 transition-all text-start flex items-center justify-between gap-3 cursor-pointer"
                 >

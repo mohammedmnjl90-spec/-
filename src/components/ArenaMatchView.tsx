@@ -39,9 +39,11 @@ interface ArenaMatchViewProps {
     roundPoints: number,
     roundCoins: number,
     roundXp: number,
-    fairPlayPenalty: number
+    fairPlayPenalty: number,
+    eventKey?: string
   ) => void;
   onCompleteMatch: (result: {
+    matchId?: string;
     roundScores: [number, number, number];
     officialPointsEarned: number;
     coinsEarnedInMatch: number;
@@ -124,6 +126,18 @@ export const ArenaMatchView: React.FC<ArenaMatchViewProps> = ({
   const [totalXpInMatch, setTotalXpInMatch] = useState<number>(0);
   const roundFairPlayPenaltyRef = useRef<number>(0);
 
+  // Unique match identifier + synchronous idempotency guards against double-taps or reconnect replays
+  const matchIdRef = useRef<string>(
+    `match_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+  );
+  const answerLockedRef = useRef<boolean>(false);
+  const syncedRoundsRef = useRef<Set<number>>(new Set());
+  const matchCompletedRef = useRef<boolean>(false);
+  const stageRef = useRef<'playing_question' | 'round_summary' | 'match_summary'>(stage);
+  useEffect(() => {
+    stageRef.current = stage;
+  }, [stage]);
+
   const transitionTimeoutRef = useRef<number | null>(null);
   const timingTokenRef = useRef<QuestionTimingToken | null>(null);
   const isPausedByNetworkRef = useRef<boolean>(isPausedByNetwork);
@@ -170,6 +184,7 @@ export const ArenaMatchView: React.FC<ArenaMatchViewProps> = ({
       pendingAdvanceScoresRef.current = null;
       if (questionIndexInRound + 1 < QUESTIONS_PER_ROUND) {
         remainingMsRef.current = QUESTION_TIME_LIMIT * 1000;
+        answerLockedRef.current = false;
         setQuestionIndexInRound((prev) => prev + 1);
         setTimeLeft(QUESTION_TIME_LIMIT);
         setTimeProgressPct(100);
@@ -188,14 +203,18 @@ export const ArenaMatchView: React.FC<ArenaMatchViewProps> = ({
         const rXp = pts * 20;
         soundEngine.playRoundComplete(pts);
 
-        // Immediately sync single round points (+0, +1, or +2 max) to Cloud Firestore
-        onRoundCompleteSync?.(
-          pts,
-          rCoins,
-          rXp,
-          roundFairPlayPenaltyRef.current
-        );
-        roundFairPlayPenaltyRef.current = 0;
+        // Idempotent single-round sync: guarantees each round in a match commits ONCE only
+        if (!syncedRoundsRef.current.has(currentRound)) {
+          syncedRoundsRef.current.add(currentRound);
+          onRoundCompleteSync?.(
+            pts,
+            rCoins,
+            rXp,
+            roundFairPlayPenaltyRef.current,
+            `${matchIdRef.current}_r${currentRound}`
+          );
+          roundFairPlayPenaltyRef.current = 0;
+        }
 
         setStage('round_summary');
         onRoundCompleteAdCheck?.();
@@ -223,7 +242,11 @@ export const ArenaMatchView: React.FC<ArenaMatchViewProps> = ({
 
   const handleAnswerSubmission = useCallback(
     (chosenOption: string | null, isInstantSolveLifeline = false) => {
-      if (isAnswerLocked || !currentQuestion || isPausedByNetworkRef.current) return;
+      // Synchronous lock prevents rapid double-taps within the same animation frame
+      if (answerLockedRef.current || isAnswerLocked || !currentQuestion || isPausedByNetworkRef.current) {
+        return;
+      }
+      answerLockedRef.current = true;
       setIsAnswerLocked(true);
       setSelectedOption(chosenOption);
 
@@ -297,13 +320,12 @@ export const ArenaMatchView: React.FC<ArenaMatchViewProps> = ({
     handleAnswerSubmissionRef.current = handleAnswerSubmission;
   }, [handleAnswerSubmission]);
 
-  // Intercept Hardware Back Button during match to pause timer and open Withdraw Confirmation
+  // Intercept Hardware Back Button ONCE while match is mounted (never re-push on round transitions)
   useEffect(() => {
-    if (stage === 'match_summary') return;
-
     window.history.pushState({ matchActiveGuard: true }, '');
 
     const handleMatchPopState = (e: PopStateEvent) => {
+      if (stageRef.current === 'match_summary') return;
       e.stopImmediatePropagation();
       setIsWithdrawConfirmOpen(true);
       window.history.pushState({ matchActiveGuard: true }, '');
@@ -311,7 +333,7 @@ export const ArenaMatchView: React.FC<ArenaMatchViewProps> = ({
 
     window.addEventListener('popstate', handleMatchPopState, true);
     return () => window.removeEventListener('popstate', handleMatchPopState, true);
-  }, [stage]);
+  }, []);
 
   // High-precision 6-second monotonic countdown timer — freezes instantaneously on withdraw modal OR network drop
   useEffect(() => {
@@ -445,6 +467,7 @@ export const ArenaMatchView: React.FC<ArenaMatchViewProps> = ({
     soundEngine.playClick();
     if (currentRound < TOTAL_ROUNDS) {
       remainingMsRef.current = QUESTION_TIME_LIMIT * 1000;
+      answerLockedRef.current = false;
       setCurrentRound((prev) => prev + 1);
       setQuestionIndexInRound(0);
       setTimeLeft(QUESTION_TIME_LIMIT);
@@ -457,6 +480,12 @@ export const ArenaMatchView: React.FC<ArenaMatchViewProps> = ({
       setUsedFreezeInQuestion(false);
       setStage('playing_question');
     } else {
+      if (matchCompletedRef.current) {
+        setStage('match_summary');
+        return;
+      }
+      matchCompletedRef.current = true;
+
       const r1Pts = calculateRoundOfficialPoints(roundCorrectCounts[0]);
       const r2Pts = calculateRoundOfficialPoints(roundCorrectCounts[1]);
       const r3Pts = calculateRoundOfficialPoints(roundCorrectCounts[2]);
@@ -465,6 +494,7 @@ export const ArenaMatchView: React.FC<ArenaMatchViewProps> = ({
       const finalXp = totalXpInMatch;
 
       onCompleteMatch({
+        matchId: matchIdRef.current,
         roundScores: roundCorrectCounts,
         officialPointsEarned: totalOfficialPoints,
         coinsEarnedInMatch: roundCoins,
@@ -482,6 +512,12 @@ export const ArenaMatchView: React.FC<ArenaMatchViewProps> = ({
   const handleRestartNewMatch = () => {
     if (isPausedByNetwork) return;
     soundEngine.playClick();
+    matchIdRef.current = `match_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    answerLockedRef.current = false;
+    syncedRoundsRef.current = new Set();
+    matchCompletedRef.current = false;
+    roundFairPlayPenaltyRef.current = 0;
+    pendingAdvanceScoresRef.current = null;
     remainingMsRef.current = QUESTION_TIME_LIMIT * 1000;
     setMatchQuestions(
       selectMatchQuestions(

@@ -1,11 +1,10 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import {
   AppLanguage,
   ChatMessage,
   ChatThreadMeta,
   FriendContact,
   FriendRequest,
-  LeaderboardEntry,
   PlayerProfile,
 } from '../types/game';
 import { storageRepo } from '../services/storageRepository';
@@ -19,7 +18,6 @@ import {
   AlertCircle,
   CheckCircle2,
   Users,
-  Sparkles,
   ArrowRight,
   ArrowLeft,
   Bell,
@@ -136,12 +134,48 @@ export const FriendsAndChatView: React.FC<FriendsAndChatViewProps> = ({
   const [messagesByChatId, setMessagesByChatId] = useState<Record<string, ChatMessage[]>>({});
   const [isLoadingMessages, setIsLoadingMessages] = useState<boolean>(false);
   const [chatError, setChatError] = useState<string | null>(null);
-  const [messageInput, setMessageInput] = useState('');
   const [isSendingMessage, setIsSendingMessage] = useState(false);
-  const [discoverPlayers, setDiscoverPlayers] = useState<LeaderboardEntry[]>([]);
 
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  // Per-chat draft storage persisted in sessionStorage so typed messages NEVER disappear
+  // due to re-renders, live presence ticks, incoming messages, or switching friends.
+  const draftStorageKey = `midan_chat_drafts_${authUid || profile.playerId}`;
+  const [draftsByChatId, setDraftsByChatId] = useState<Record<string, string>>(() => {
+    try {
+      const raw = sessionStorage.getItem(`midan_chat_drafts_${authUid || profile.playerId}`);
+      if (!raw) return {};
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' ? (parsed as Record<string, string>) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  const messagesContainerRef = useRef<HTMLDivElement | null>(null);
+  const chatInputRef = useRef<HTMLInputElement | null>(null);
   const prevMsgCountRef = useRef<number>(0);
+  const prevScrolledChatKeyRef = useRef<string>('');
+  const prevScrolledCountRef = useRef<number>(0);
+  const onMarkChatAsReadRef = useRef(onMarkChatAsRead);
+  useEffect(() => {
+    onMarkChatAsReadRef.current = onMarkChatAsRead;
+  }, [onMarkChatAsRead]);
+
+  // Persist drafts whenever they change
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(draftStorageKey, JSON.stringify(draftsByChatId));
+    } catch {
+      // ignore storage quota issues
+    }
+  }, [draftStorageKey, draftsByChatId]);
+
+  const setDraftForChat = useCallback((chatId: string, nextValue: string) => {
+    if (!chatId) return;
+    setDraftsByChatId((prev) => {
+      if ((prev[chatId] || '') === nextValue) return prev;
+      return { ...prev, [chatId]: nextValue };
+    });
+  }, []);
 
   // Sync external jump-to-friend request (e.g. clicking a top toast notification)
   useEffect(() => {
@@ -170,21 +204,7 @@ export const FriendsAndChatView: React.FC<FriendsAndChatViewProps> = ({
     return () => onActiveFriendUidChange?.(null);
   }, [activeFriendUid, onActiveFriendUidChange]);
 
-  // Fetch real registered players from Firestore for quick friend request suggestions
-  useEffect(() => {
-    if (!authUid) return;
-    let cancelled = false;
-    void storageRepo.fetchDiscoverableCloudPlayers(authUid, 16).then((list) => {
-      if (!cancelled) {
-        setDiscoverPlayers(list);
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [authUid]);
-
-  // Merge real-time chat metadata (unread count & last message preview) into friends list and sort by latest activity
+  // Merge real-time chat metadata (unread count & last message preview) into confirmed friends list ONLY
   const enrichedFriends = useMemo(() => {
     return friends
       .map((friend) => {
@@ -217,25 +237,21 @@ export const FriendsAndChatView: React.FC<FriendsAndChatViewProps> = ({
   const activeMessages: ChatMessage[] = activeChatId
     ? messagesByChatId[activeChatId] || []
     : [];
+  const activeMessageDraft = activeChatId ? draftsByChatId[activeChatId] || '' : '';
 
   // Subscribe to real-time Firestore private chat messages for the active friend
   useEffect(() => {
-    if (!authUid || !activeFriend?.uid) {
+    if (!authUid || !activeFriendUid) {
       setIsLoadingMessages(false);
       return;
     }
 
-    const friendUid = activeFriend.uid;
+    const friendUid = activeFriendUid;
     const chatId = [authUid, friendUid].sort().join('_');
 
     setChatError(null);
     setIsLoadingMessages(true);
     prevMsgCountRef.current = 0;
-
-    // Immediately clear unread badge when opening this conversation
-    if (activeFriend.unreadCount > 0) {
-      onMarkChatAsRead(activeFriend);
-    }
 
     const unsubscribe = storageRepo.subscribeToPrivateChatMessages(
       authUid,
@@ -276,19 +292,27 @@ export const FriendsAndChatView: React.FC<FriendsAndChatViewProps> = ({
     );
 
     return () => unsubscribe();
-  }, [authUid, activeFriend?.uid, lang]);
+  }, [authUid, activeFriendUid, lang]);
 
-  // Also clear unread count immediately if metadata updates while chat is open
+  // Clear unread count cleanly if unread messages arrive while chat is open
   useEffect(() => {
     if (activeFriend && activeFriend.unreadCount > 0) {
-      onMarkChatAsRead(activeFriend);
+      onMarkChatAsReadRef.current(activeFriend);
     }
-  }, [activeFriend?.uid, activeFriend?.unreadCount, onMarkChatAsRead]);
+  }, [activeFriend?.uid, activeFriend?.unreadCount]);
 
-  // Auto-scroll to latest message
+  // Scroll ONLY the internal chat feed container (never scrollIntoView, which jolts mobile viewport & keyboard!)
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [activeMessages.length, activeFriendUid]);
+    const container = messagesContainerRef.current;
+    if (!container || !activeChatId) return;
+    const chatChanged = prevScrolledChatKeyRef.current !== activeChatId;
+    const countIncreased = activeMessages.length > prevScrolledCountRef.current;
+    if (chatChanged || countIncreased) {
+      prevScrolledChatKeyRef.current = activeChatId;
+      prevScrolledCountRef.current = activeMessages.length;
+      container.scrollTop = container.scrollHeight;
+    }
+  }, [activeMessages.length, activeChatId]);
 
   const showTempFeedback = (type: 'ok' | 'err', text: string, durationMs = 4000) => {
     setAddFeedback({ type, text });
@@ -332,46 +356,6 @@ export const FriendsAndChatView: React.FC<FriendsAndChatViewProps> = ({
             lang,
             `تم إرسال طلب صداقة إلى «${res.targetUsername}» بنجاح! سيظهر لديه إشعار فوري.`,
             `Friend request sent to "${res.targetUsername}"! They will receive an instant notification.`
-          )
-        );
-      }
-    } finally {
-      setIsSendingRequest(false);
-    }
-  };
-
-  const handleQuickSendSuggested = async (identifier: string) => {
-    if (isSendingRequest) return;
-    setIsSendingRequest(true);
-    setAddFeedback(null);
-    try {
-      const res = await onSendFriendRequest(identifier);
-      if (!res.ok) {
-        soundEngine.playWrong();
-        showTempFeedback('err', res.error, 5000);
-        return;
-      }
-      soundEngine.playReward();
-      if (res.status === 'auto_accepted') {
-        if (res.friend.uid) {
-          setActiveFriendUid(res.friend.uid);
-          setMobileShowChat(true);
-        }
-        showTempFeedback(
-          'ok',
-          tr(
-            lang,
-            `تمت إضافة «${res.friend.username}» كصديق بنجاح!`,
-            `"${res.friend.username}" is now your friend!`
-          )
-        );
-      } else {
-        showTempFeedback(
-          'ok',
-          tr(
-            lang,
-            `تم إرسال طلب صداقة إلى «${res.targetUsername}» بنجاح!`,
-            `Friend request sent to "${res.targetUsername}"!`
           )
         );
       }
@@ -433,60 +417,51 @@ export const FriendsAndChatView: React.FC<FriendsAndChatViewProps> = ({
 
   const handleSendChat = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!activeFriend || !messageInput.trim() || isSendingMessage) return;
+    if (!activeFriend || !activeChatId || isSendingMessage) return;
 
-    const textToSend = messageInput.trim();
-    setMessageInput('');
+    const rawDraftAtSubmit = draftsByChatId[activeChatId] || '';
+    const textToSend = rawDraftAtSubmit.trim();
+    if (!textToSend) return;
+
+    const targetChatId = activeChatId;
+    const targetFriend = activeFriend;
+
     setChatError(null);
     setIsSendingMessage(true);
     soundEngine.playClick();
 
     try {
-      const res = await onSendMessage(activeFriend, textToSend);
+      const res = await onSendMessage(targetFriend, textToSend);
       if (!res.ok) {
         soundEngine.playWrong();
-        setMessageInput(textToSend);
+        // Keep the user's draft completely intact on failure!
         setChatError(res.error);
         return;
       }
 
+      // Clear ONLY if the user hasn't modified the draft while sending
+      setDraftsByChatId((prev) => {
+        if (prev[targetChatId] !== rawDraftAtSubmit) {
+          return prev;
+        }
+        const next = { ...prev };
+        delete next[targetChatId];
+        return next;
+      });
+
       // Optimistically ensure the sent message is visible immediately (deduped with onSnapshot)
-      if (activeChatId) {
-        setMessagesByChatId((prev) => {
-          const current = prev[activeChatId] || [];
-          if (current.some((m) => m.id === res.message.id)) return prev;
-          return {
-            ...prev,
-            [activeChatId]: [...current, res.message],
-          };
-        });
-      }
+      setMessagesByChatId((prev) => {
+        const current = prev[targetChatId] || [];
+        if (current.some((m) => m.id === res.message.id)) return prev;
+        return {
+          ...prev,
+          [targetChatId]: [...current, res.message],
+        };
+      });
     } finally {
       setIsSendingMessage(false);
     }
   };
-
-  // Filter discoverable real players: exclude self, current friends, incoming/outgoing pending requests
-  const suggestedCloudPlayers = useMemo(() => {
-    const friendUids = new Set(friends.map((f) => f.uid).filter(Boolean));
-    const friendPlayerIds = new Set(friends.map((f) => f.playerId));
-    const pendingUids = new Set([
-      ...incomingRequests.map((r) => r.fromUid),
-      ...outgoingRequests.map((r) => r.toUid),
-    ]);
-
-    return discoverPlayers
-      .filter(
-        (p) =>
-          p.uid &&
-          p.uid !== authUid &&
-          p.playerId !== profile.playerId &&
-          !friendUids.has(p.uid) &&
-          !friendPlayerIds.has(p.playerId) &&
-          !pendingUids.has(p.uid)
-      )
-      .slice(0, 4);
-  }, [discoverPlayers, friends, incomingRequests, outgoingRequests, authUid, profile.playerId]);
 
   const totalUnreadMessages = enrichedFriends.reduce(
     (sum, f) => sum + (f.unreadCount || 0),
@@ -701,50 +676,6 @@ export const FriendsAndChatView: React.FC<FriendsAndChatViewProps> = ({
                     title={tr(lang, 'إلغاء الطلب', 'Cancel request')}
                   >
                     <X className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Discover Real Active Cloud Players */}
-        {suggestedCloudPlayers.length > 0 && (
-          <div className="pt-3 border-t border-slate-800/80 space-y-2.5">
-            <div className="text-xs font-bold text-slate-400 flex items-center gap-1.5">
-              <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-              <span>
-                {tr(
-                  lang,
-                  'لاعبون مسجلون في قمة التحدي (إرسال طلب صداقة سريع):',
-                  'Registered Arena Players (Quick Friend Request):'
-                )}
-              </span>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
-              {suggestedCloudPlayers.map((sp) => (
-                <div
-                  key={sp.uid || sp.playerId}
-                  className="p-3 rounded-xl bg-[#0B1120] border border-slate-800 flex items-center justify-between gap-2"
-                >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="text-xl shrink-0">{sp.country.flag}</span>
-                    <div className="min-w-0">
-                      <div className="text-xs font-extrabold text-white truncate">
-                        {sp.username}
-                      </div>
-                      <div className="text-[10px] text-slate-400 font-mono-num">
-                        ID: {sp.playerId}
-                      </div>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    disabled={isSendingRequest}
-                    onClick={() => void handleQuickSendSuggested(sp.playerId)}
-                    className="px-2.5 py-1.5 rounded-lg bg-cyan-500/20 hover:bg-cyan-500 text-cyan-300 hover:text-slate-950 border border-cyan-500/40 text-[11px] font-extrabold transition-colors cursor-pointer shrink-0 disabled:opacity-50"
-                  >
-                    + {tr(lang, 'طلب', 'Add')}
                   </button>
                 </div>
               ))}
@@ -994,7 +925,10 @@ export const FriendsAndChatView: React.FC<FriendsAndChatViewProps> = ({
               )}
 
               {/* Chat Messages Feed */}
-              <div className="flex-1 overflow-y-auto px-4 py-4 space-y-2.5 bg-[#080C16]/70">
+              <div
+                ref={messagesContainerRef}
+                className="flex-1 overflow-y-auto overscroll-contain px-4 py-4 space-y-2.5 bg-[#080C16]/70"
+              >
                 {isLoadingMessages && activeMessages.length === 0 ? (
                   <div className="h-full flex flex-col items-center justify-center gap-2 text-slate-400 text-xs">
                     <Loader2 className="w-6 h-6 animate-spin text-cyan-400" />
@@ -1128,7 +1062,6 @@ export const FriendsAndChatView: React.FC<FriendsAndChatViewProps> = ({
                   })
                 )}
 
-                <div ref={messagesEndRef} />
               </div>
 
               {/* Chat Input Bar */}
@@ -1137,20 +1070,22 @@ export const FriendsAndChatView: React.FC<FriendsAndChatViewProps> = ({
                 className="p-3.5 bg-[#0B1120] border-t border-slate-800 flex items-center gap-2.5"
               >
                 <input
+                  ref={chatInputRef}
                   type="text"
-                  value={messageInput}
-                  onChange={(e) => setMessageInput(e.target.value)}
+                  value={activeMessageDraft}
+                  onChange={(e) => setDraftForChat(activeChatId, e.target.value)}
                   placeholder={tr(
                     lang,
                     `اكتب رسالة فورية إلى ${activeFriend.username}...`,
                     `Write a live message to ${activeFriend.username}...`
                   )}
                   maxLength={500}
+                  autoComplete="off"
                   className="flex-1 px-4 py-3 rounded-xl bg-[#111827] border border-slate-700 focus:border-cyan-400 focus:outline-none text-sm text-white placeholder-slate-500"
                 />
                 <button
                   type="submit"
-                  disabled={!messageInput.trim() || isSendingMessage}
+                  disabled={!activeMessageDraft.trim() || isSendingMessage}
                   className="px-5 py-3 rounded-xl bg-cyan-500 hover:bg-cyan-400 disabled:opacity-40 disabled:pointer-events-none text-slate-950 font-extrabold text-xs flex items-center gap-1.5 cursor-pointer transition-colors whitespace-nowrap"
                 >
                   {isSendingMessage ? (

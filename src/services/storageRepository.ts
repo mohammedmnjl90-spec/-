@@ -51,9 +51,15 @@ import {
   sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signOut,
+  updateProfile,
 } from '../firebaseConfig';
 import { antiCheatGuard } from '../utils/antiCheatGuard';
 import { globalErrorHandler } from '../utils/globalErrorHandler';
+import {
+  arePhonesEquivalent,
+  extractAsciiDigits,
+  normalizePhoneForAuth,
+} from '../utils/phoneUtils';
 
 const STORAGE_KEY_LEGACY_PROFILE = 'midan_almarifa_player_v1';
 const STORAGE_KEY_ACCOUNTS = 'midan_almarifa_accounts_v2';
@@ -1669,6 +1675,13 @@ export class StorageRepository {
       );
       const uid = cred.user.uid;
 
+      // Persist username directly on Firebase Auth user profile as a resilient secondary backup
+      try {
+        await updateProfile(cred.user, { displayName: cleanName });
+      } catch {
+        // Non-fatal if displayName update fails; Firestore players/{uid} remains primary
+      }
+
       // 3. Build full PlayerProfile with uid and phone/email
       const accounts = this.loadAllSavedAccounts();
       const existingIds = [
@@ -1764,18 +1777,16 @@ export class StorageRepository {
   }): Promise<{ ok: true; profile: PlayerProfile } | { ok: false; error: string }> {
     let authEmail = '';
     let normalizedPhone = '';
+    const candidateEmails: { email: string; phone: string }[] = [];
+
     if (params.contactType === 'phone') {
-      const converted =
-        params.validatedSyntheticEmail && params.validatedNormalizedPhone
-          ? {
-              syntheticEmail: params.validatedSyntheticEmail,
-              normalizedPhone: params.validatedNormalizedPhone,
-            }
-          : phoneToSyntheticEmail(params.country.dialCode, params.rawIdentifier);
+      const normalized = normalizePhoneForAuth(params.country.dialCode, params.rawIdentifier);
+      const primaryEmail = params.validatedSyntheticEmail || normalized.syntheticEmail;
+      const primaryPhone = params.validatedNormalizedPhone || normalized.normalizedPhone;
 
       if (
-        !/^\+[1-9][0-9]{7,14}$/.test(converted.normalizedPhone) ||
-        !/^phone_[1-9][0-9]{7,14}@neurox\.app$/.test(converted.syntheticEmail)
+        !/^\+[1-9][0-9]{7,14}$/.test(primaryPhone) ||
+        !/^phone_[1-9][0-9]{7,14}@neurox\.app$/.test(primaryEmail)
       ) {
         return {
           ok: false,
@@ -1786,18 +1797,87 @@ export class StorageRepository {
         };
       }
 
-      authEmail = converted.syntheticEmail;
-      normalizedPhone = converted.normalizedPhone;
+      authEmail = primaryEmail;
+      normalizedPhone = primaryPhone;
+      candidateEmails.push({ email: primaryEmail, phone: primaryPhone });
+
+      // Add safe legacy fallback formats (e.g., if registered with leading zero before stripping)
+      for (const fallbackEmail of normalized.loginFallbackEmails) {
+        if (!candidateEmails.some((c) => c.email === fallbackEmail)) {
+          candidateEmails.push({ email: fallbackEmail, phone: primaryPhone });
+        }
+      }
+
+      // Check local saved accounts on this device: if the user entered their subscriber digits
+      // while forgetting to switch the country code dropdown (e.g., default SA +966 vs saved YE +967),
+      // include that exact saved account's canonical phone synthetic email as a login fallback.
+      const subDigits = normalized.subscriberDigits;
+      if (subDigits.length >= 7) {
+        const localSaved = this.loadAllSavedAccounts();
+        for (const acc of localSaved) {
+          if (acc.contactType !== 'phone') continue;
+          const accPhone = acc.phone || acc.contactValue || '';
+          const accDigits = extractAsciiDigits(accPhone);
+          if (accDigits.length >= 8 && accDigits.endsWith(subDigits)) {
+            const altEmail = `phone_${accDigits}@neurox.app`;
+            const altPhone = `+${accDigits}`;
+            if (!candidateEmails.some((c) => c.email === altEmail)) {
+              candidateEmails.push({ email: altEmail, phone: altPhone });
+            }
+          }
+        }
+      }
     } else {
       authEmail = params.rawIdentifier.trim().toLowerCase();
+      candidateEmails.push({ email: authEmail, phone: '' });
     }
 
     try {
-      const cred = await signInWithEmailAndPassword(auth, authEmail, params.password);
+      let cred: Awaited<ReturnType<typeof signInWithEmailAndPassword>> | null = null;
+      let matchedEmail = authEmail;
+      let matchedPhone = normalizedPhone;
+      let lastAuthError: unknown = null;
+
+      for (let i = 0; i < candidateEmails.length; i++) {
+        const candidate = candidateEmails[i];
+        try {
+          cred = await signInWithEmailAndPassword(auth, candidate.email, params.password);
+          matchedEmail = candidate.email;
+          matchedPhone = candidate.phone || normalizedPhone;
+          break;
+        } catch (err) {
+          lastAuthError = err;
+          const code =
+            typeof err === 'object' && err !== null && 'code' in err
+              ? String((err as { code?: unknown }).code || '')
+              : '';
+          const canTryNextCandidate =
+            code === 'auth/invalid-credential' ||
+            code === 'auth/user-not-found' ||
+            code === 'auth/invalid-email';
+          if (!canTryNextCandidate || i === candidateEmails.length - 1) {
+            throw err;
+          }
+        }
+      }
+
+      if (!cred) {
+        throw lastAuthError || new Error('auth/invalid-credential');
+      }
+
       const uid = cred.user.uid;
+      authEmail = matchedEmail;
+      normalizedPhone = matchedPhone;
 
       const playerRef = doc(db, 'players', uid);
-      const snap = await getDoc(playerRef);
+      const publicRef = doc(db, 'leaderboard_public', uid);
+      const [snap, publicSnap] = await Promise.all([
+        globalErrorHandler.withSafeRetry(() => getDoc(playerRef), {
+          maxRetries: 2,
+          baseDelayMs: 400,
+        }),
+        getDoc(publicRef).catch(() => null),
+      ]);
 
       const localAccounts = this.loadAllSavedAccounts();
       const localMatch = localAccounts.find(
@@ -1807,26 +1887,62 @@ export class StorageRepository {
             (a.email?.toLowerCase() === authEmail ||
               a.contactValue?.toLowerCase() === authEmail)) ||
           (params.contactType === 'phone' &&
-            (a.phone === normalizedPhone || a.contactValue === normalizedPhone))
+            (arePhonesEquivalent(a.phone, normalizedPhone) ||
+              arePhonesEquivalent(a.contactValue, normalizedPhone)))
       );
+
+      const publicData = publicSnap && publicSnap.exists() ? publicSnap.data() : null;
+      const authDisplayName =
+        typeof cred.user.displayName === 'string' ? cred.user.displayName.trim() : '';
+
+      const resolveCleanUsername = (
+        ...candidates: Array<unknown>
+      ): string => {
+        for (const c of candidates) {
+          if (typeof c === 'string') {
+            const clean = c.trim().slice(0, 24);
+            if (clean.length >= 2) return clean;
+          }
+        }
+        return '';
+      };
 
       if (snap.exists()) {
         const cloudData = snap.data();
+        const resolvedUsername =
+          resolveCleanUsername(
+            cloudData.username,
+            publicData?.username,
+            authDisplayName,
+            localMatch?.username
+          ) ||
+          (params.contactType === 'email'
+            ? authEmail.split('@')[0].slice(0, 18)
+            : `بطل_${normalizedPhone.slice(-4)}`);
+
+        if (authDisplayName !== resolvedUsername) {
+          void updateProfile(cred.user, { displayName: resolvedUsername }).catch(() => {});
+        }
+
         const resolvedCountry = resolveCountryByCode(
-          cloudData.countryCode,
-          (cloudData.country as CountryInfo | undefined) || params.country
+          cloudData.countryCode || publicData?.countryCode,
+          (cloudData.country as CountryInfo | undefined) ||
+            localMatch?.country ||
+            params.country
         );
         const cloudPts =
           typeof cloudData.monthlyRoundPoints === 'number'
             ? cloudData.monthlyRoundPoints
             : typeof cloudData.monthlyPoints === 'number'
             ? cloudData.monthlyPoints
+            : typeof publicData?.monthlyRoundPoints === 'number'
+            ? publicData.monthlyRoundPoints
             : localMatch?.monthlyPoints || 0;
 
         const baseProfile: PlayerProfile = localMatch
           ? this.ensureProfileFields(localMatch)
           : this.createNewProfile(
-              cloudData.username || 'بطل_التحدي',
+              resolvedUsername,
               resolvedCountry,
               params.contactType,
               params.contactType === 'phone' ? normalizedPhone : authEmail,
@@ -1837,11 +1953,18 @@ export class StorageRepository {
         const mergedProfile: PlayerProfile = {
           ...baseProfile,
           uid,
-          playerId: cloudData.playerId || baseProfile.playerId,
-          username: cloudData.username || baseProfile.username,
+          playerId:
+            (typeof cloudData.playerId === 'string' && cloudData.playerId.length === 10
+              ? cloudData.playerId
+              : typeof publicData?.playerId === 'string' && publicData.playerId.length === 10
+              ? publicData.playerId
+              : baseProfile.playerId),
+          username: resolvedUsername,
           usernameNormalized:
-            cloudData.usernameNormalized ||
-            normalizeUsernameKey(cloudData.username || baseProfile.username),
+            (typeof cloudData.usernameNormalized === 'string' &&
+            cloudData.usernameNormalized.trim().length >= 2
+              ? cloudData.usernameNormalized.trim()
+              : normalizeUsernameKey(resolvedUsername)),
           country: resolvedCountry,
           contactType:
             (cloudData.contactType as 'phone' | 'email' | undefined) ||
@@ -1859,7 +1982,9 @@ export class StorageRepository {
             cloudData.role === 'admin' || baseProfile.role === 'admin'
               ? 'admin'
               : 'player',
-          isAdmin: Boolean(cloudData.isAdmin || cloudData.role === 'admin' || baseProfile.isAdmin),
+          isAdmin: Boolean(
+            cloudData.isAdmin || cloudData.role === 'admin' || baseProfile.isAdmin
+          ),
           monthlyPoints: Math.max(baseProfile.monthlyPoints, cloudPts),
           monthlyRoundPoints: Math.max(baseProfile.monthlyPoints, cloudPts),
           coins:
@@ -1891,11 +2016,30 @@ export class StorageRepository {
         return { ok: true, profile: saved };
       }
 
-      // If Auth succeeded but `players/{uid}` didn't exist yet in Firestore, create it immediately now
+      // If Auth succeeded but `players/{uid}` didn't exist yet in Firestore,
+      // recover real username from `leaderboard_public`, Firebase Auth displayName, or local saved account
+      const recoveredUsername =
+        resolveCleanUsername(
+          publicData?.username,
+          authDisplayName,
+          localMatch?.username
+        ) ||
+        (params.contactType === 'email'
+          ? authEmail.split('@')[0].slice(0, 18)
+          : `بطل_${normalizedPhone.slice(-4)}`);
+
+      const recoveredCountry = resolveCountryByCode(
+        publicData?.countryCode,
+        localMatch?.country || params.country
+      );
+
       const fallbackProfile: PlayerProfile = localMatch
         ? {
             ...this.ensureProfileFields(localMatch),
             uid,
+            username: recoveredUsername,
+            usernameNormalized: normalizeUsernameKey(recoveredUsername),
+            country: recoveredCountry,
             contactType: params.contactType,
             contactValue:
               params.contactType === 'phone' ? normalizedPhone : authEmail,
@@ -1903,10 +2047,8 @@ export class StorageRepository {
             phone: params.contactType === 'phone' ? normalizedPhone : localMatch.phone,
           }
         : this.createNewProfile(
-            params.contactType === 'email'
-              ? authEmail.split('@')[0].slice(0, 18)
-              : `بطل_${normalizedPhone.slice(-4)}`,
-            params.country,
+            recoveredUsername,
+            recoveredCountry,
             params.contactType,
             params.contactType === 'phone' ? normalizedPhone : authEmail,
             params.lang,
@@ -1914,6 +2056,21 @@ export class StorageRepository {
           );
 
       fallbackProfile.uid = uid;
+      if (typeof publicData?.playerId === 'string' && publicData.playerId.length === 10) {
+        fallbackProfile.playerId = publicData.playerId;
+      }
+      if (typeof publicData?.monthlyRoundPoints === 'number') {
+        fallbackProfile.monthlyPoints = Math.max(
+          fallbackProfile.monthlyPoints,
+          publicData.monthlyRoundPoints
+        );
+        fallbackProfile.monthlyRoundPoints = fallbackProfile.monthlyPoints;
+      }
+
+      if (authDisplayName !== recoveredUsername) {
+        void updateProfile(cred.user, { displayName: recoveredUsername }).catch(() => {});
+      }
+
       await this.syncProfileToFirestore(fallbackProfile, undefined, true);
       const saved = this.saveProfile(fallbackProfile, { skipCloudSync: true });
       this.setCloudStatus(true, null);
@@ -1929,6 +2086,188 @@ export class StorageRepository {
       this.setCloudStatus(false, userMessage, isNetworkConnectivityError(error));
       return { ok: false, error: userMessage };
     }
+  }
+
+  /**
+   * Authoritatively hydrates a signed-in user's profile from Cloud Firestore (`players/{uid}`
+   * + `leaderboard_public/{uid}`) and Firebase Auth `displayName`, unifying the single source
+   * of truth across all screens immediately on sign-in, session restoration, or reconnect.
+   */
+  public async hydrateProfileFromCloud(
+    uid: string,
+    currentLocal?: PlayerProfile | null
+  ): Promise<PlayerProfile | null> {
+    if (!uid) return currentLocal || null;
+
+    try {
+      const playerRef = doc(db, 'players', uid);
+      const publicRef = doc(db, 'leaderboard_public', uid);
+      const [playerSnap, publicSnap] = await Promise.all([
+        globalErrorHandler.withSafeRetry(() => getDoc(playerRef), {
+          maxRetries: 2,
+          baseDelayMs: 400,
+        }),
+        getDoc(publicRef).catch(() => null),
+      ]);
+
+      const cloudData = playerSnap.exists() ? playerSnap.data() : null;
+      const publicData = publicSnap && publicSnap.exists() ? publicSnap.data() : null;
+      const authUser = auth.currentUser;
+      const authDisplayName =
+        typeof authUser?.displayName === 'string' ? authUser.displayName.trim() : '';
+
+      const localAccounts = this.loadAllSavedAccounts();
+      const matchingLocal =
+        (currentLocal && currentLocal.uid === uid ? currentLocal : null) ||
+        localAccounts.find((a) => a.uid === uid) ||
+        null;
+
+      if (!cloudData && !publicData && !matchingLocal) {
+        return currentLocal || null;
+      }
+
+      const pickName = (...candidates: Array<unknown>): string => {
+        for (const c of candidates) {
+          if (typeof c === 'string') {
+            const clean = c.trim().slice(0, 24);
+            if (clean.length >= 2) return clean;
+          }
+        }
+        return '';
+      };
+
+      const resolvedUsername =
+        pickName(
+          cloudData?.username,
+          publicData?.username,
+          authDisplayName,
+          matchingLocal?.username
+        ) || 'بطل_التحدي';
+
+      const resolvedCountry = resolveCountryByCode(
+        cloudData?.countryCode || publicData?.countryCode,
+        (cloudData?.country as CountryInfo | undefined) ||
+          matchingLocal?.country ||
+          COUNTRIES_LIST[0]
+      );
+
+      const baseProfile: PlayerProfile = matchingLocal
+        ? this.ensureProfileFields(matchingLocal)
+        : this.createNewProfile(
+            resolvedUsername,
+            resolvedCountry,
+            (cloudData?.contactType as 'phone' | 'email') || 'email',
+            String(
+              cloudData?.contactValue ||
+                cloudData?.phone ||
+                cloudData?.email ||
+                authUser?.email ||
+                ''
+            ),
+            currentLocal?.settings?.language || detectInitialLanguage(),
+            true
+          );
+
+      const cloudPts =
+        typeof cloudData?.monthlyRoundPoints === 'number'
+          ? cloudData.monthlyRoundPoints
+          : typeof cloudData?.monthlyPoints === 'number'
+          ? cloudData.monthlyPoints
+          : typeof publicData?.monthlyRoundPoints === 'number'
+          ? publicData.monthlyRoundPoints
+          : baseProfile.monthlyPoints;
+
+      const cloudMonthKey =
+        typeof cloudData?.currentMonthKey === 'string' &&
+        /^[0-9]{4}-[0-9]{2}$/.test(cloudData.currentMonthKey)
+          ? cloudData.currentMonthKey
+          : baseProfile.currentMonthKey;
+
+      const isSameMonth = cloudMonthKey === baseProfile.currentMonthKey;
+      const syncedMonthlyPoints = isSameMonth
+        ? Math.max(baseProfile.monthlyPoints, cloudPts)
+        : cloudMonthKey > baseProfile.currentMonthKey
+        ? cloudPts
+        : baseProfile.monthlyPoints;
+
+      const hydrated: PlayerProfile = {
+        ...baseProfile,
+        uid,
+        playerId:
+          typeof cloudData?.playerId === 'string' && cloudData.playerId.length === 10
+            ? cloudData.playerId
+            : typeof publicData?.playerId === 'string' && publicData.playerId.length === 10
+            ? publicData.playerId
+            : baseProfile.playerId,
+        username: resolvedUsername,
+        usernameNormalized:
+          typeof cloudData?.usernameNormalized === 'string' &&
+          cloudData.usernameNormalized.trim().length >= 2
+            ? cloudData.usernameNormalized.trim()
+            : normalizeUsernameKey(resolvedUsername),
+        country: resolvedCountry,
+        contactType:
+          (cloudData?.contactType as 'phone' | 'email' | undefined) ||
+          baseProfile.contactType,
+        contactValue: cloudData?.contactValue || baseProfile.contactValue,
+        email: cloudData?.email || baseProfile.email,
+        phone: cloudData?.phone || baseProfile.phone,
+        role:
+          cloudData?.role === 'admin' || baseProfile.role === 'admin'
+            ? 'admin'
+            : 'player',
+        isAdmin: Boolean(
+          cloudData?.isAdmin || cloudData?.role === 'admin' || baseProfile.isAdmin
+        ),
+        currentMonthKey:
+          cloudMonthKey > baseProfile.currentMonthKey
+            ? cloudMonthKey
+            : baseProfile.currentMonthKey,
+        monthlyPoints: syncedMonthlyPoints,
+        monthlyRoundPoints: syncedMonthlyPoints,
+        coins:
+          typeof cloudData?.coins === 'number'
+            ? Math.max(baseProfile.coins, cloudData.coins)
+            : baseProfile.coins,
+        xp:
+          typeof cloudData?.xp === 'number'
+            ? Math.max(baseProfile.xp, cloudData.xp)
+            : baseProfile.xp,
+        vipTier: (cloudData?.vipTier as VipTier) || baseProfile.vipTier || 'none',
+        adsRemoved: Boolean(cloudData?.adsRemoved || baseProfile.adsRemoved),
+        fairPlayScore:
+          typeof cloudData?.fairPlayScore === 'number'
+            ? Math.min(baseProfile.fairPlayScore ?? 100, cloudData.fairPlayScore)
+            : baseProfile.fairPlayScore ?? 100,
+        lastProfileEditAt:
+          typeof cloudData?.lastProfileEditAt === 'number'
+            ? Math.max(baseProfile.lastProfileEditAt ?? 0, cloudData.lastProfileEditAt)
+            : baseProfile.lastProfileEditAt ?? 0,
+      };
+
+      if (authUser && authDisplayName !== resolvedUsername) {
+        void updateProfile(authUser, { displayName: resolvedUsername }).catch(() => {});
+      }
+
+      const saved = this.saveProfile(hydrated, { skipCloudSync: true });
+      this.setCloudStatus(true, null, false);
+      return saved;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.GET, `players/${uid}`, false, 'sync');
+      return currentLocal || null;
+    }
+  }
+
+  /**
+   * Flushes any pending local points/profile sync immediately after reconnecting to the internet.
+   */
+  public async flushPendingCloudSync(profile: PlayerProfile | null): Promise<void> {
+    if (!profile) return;
+    if (this.rateLimitRetryTimer !== null) {
+      window.clearTimeout(this.rateLimitRetryTimer);
+      this.rateLimitRetryTimer = null;
+    }
+    await this.syncProfileToFirestore(profile, undefined, false, false);
   }
 
   /**
@@ -2005,8 +2344,27 @@ export class StorageRepository {
 
   public logoutCurrentProfile(): void {
     try {
+      if (this.rateLimitRetryTimer !== null) {
+        window.clearTimeout(this.rateLimitRetryTimer);
+        this.rateLimitRetryTimer = null;
+      }
+      this.pendingSyncRequest = null;
       localStorage.setItem(STORAGE_KEY_ACTIVE_ID, '__LOGGED_OUT__');
       void signOut(auth);
+    } catch {
+      // ignore
+    }
+  }
+
+  public async logoutCurrentProfileAsync(): Promise<void> {
+    try {
+      if (this.rateLimitRetryTimer !== null) {
+        window.clearTimeout(this.rateLimitRetryTimer);
+        this.rateLimitRetryTimer = null;
+      }
+      this.pendingSyncRequest = null;
+      localStorage.setItem(STORAGE_KEY_ACTIVE_ID, '__LOGGED_OUT__');
+      await signOut(auth);
     } catch {
       // ignore
     }
@@ -3454,14 +3812,20 @@ export class StorageRepository {
   /**
    * Syncs a single completed round immediately (`+0`, `+1`, or `+2` official points)
    * so that every cloud update strictly obeys `incoming().monthlyRoundPoints - existing().monthlyRoundPoints <= 2`.
+   * Includes idempotent event deduplication (`eventKey`) so retries or double-taps never duplicate points.
    */
   public recordSingleRoundProgress(
     profile: PlayerProfile,
     rawRoundPoints: number,
     rawRoundCoins: number,
     rawRoundXp: number,
-    fairPlayPenalty = 0
+    fairPlayPenalty = 0,
+    eventKey?: string
   ): PlayerProfile {
+    if (eventKey && !antiCheatGuard.claimUniqueEvent(`round:${eventKey}`)) {
+      return profile;
+    }
+
     const clampedPoints = antiCheatGuard.clampRoundOfficialPoints(rawRoundPoints);
     const clampedCoins = antiCheatGuard.clampCoinsDelta(rawRoundCoins, false);
     const currentFairPlay =
@@ -3474,7 +3838,7 @@ export class StorageRepository {
       monthlyPoints: nextPoints,
       monthlyRoundPoints: nextPoints,
       coins: profile.coins + clampedCoins,
-      xp: profile.xp + Math.max(0, Math.floor(rawRoundXp)),
+      xp: profile.xp + Math.max(0, Math.min(200, Math.floor(rawRoundXp))),
       fairPlayScore: nextFairPlay,
     };
 
@@ -3484,6 +3848,7 @@ export class StorageRepository {
   public recordMatchCompletion(
     profile: PlayerProfile,
     params: {
+      matchId?: string;
       categoryId: CategoryId;
       categoryName: string;
       roundScores: [number, number, number];
@@ -3496,21 +3861,38 @@ export class StorageRepository {
       alreadySyncedRoundsInMatch?: boolean;
     }
   ): PlayerProfile {
+    if (params.matchId && !antiCheatGuard.claimUniqueEvent(`match:${params.matchId}`)) {
+      return profile;
+    }
+
+    const vipInfo = getVipMultiplier(profile.vipTier);
+    const coinsPerOfficialPoint = 5 + vipInfo.coinBonusPerOfficialPoint;
+    const integrity = antiCheatGuard.validateMatchIntegrity({
+      roundScores: params.roundScores,
+      officialPointsEarned: params.officialPointsEarned,
+      coinsEarnedInMatch: params.coinsEarnedInMatch,
+      xpEarnedInMatch: params.xpEarnedInMatch,
+      coinsPerOfficialPoint,
+    });
+
+    const safeRoundScores = integrity.safeRoundScores;
     const totalCorrectInMatch =
-      params.roundScores[0] + params.roundScores[1] + params.roundScores[2];
-    const perfectRoundsInMatch = params.roundScores.filter((s) => s === 6).length;
+      safeRoundScores[0] + safeRoundScores[1] + safeRoundScores[2];
+    const perfectRoundsInMatch = safeRoundScores.filter((s) => s === 6).length;
     const isPerfectMatch = totalCorrectInMatch === 18;
+    const safeMaxCombo = Math.max(0, Math.min(18, Math.floor(params.maxComboInMatch || 0)));
+    const safeCombosCount = Math.max(0, Math.min(6, Math.floor(params.combosTriggeredCount || 0)));
 
     const newRecord: MatchHistoryRecord = {
-      id: `match_${Date.now()}`,
+      id: params.matchId || `match_${Date.now()}`,
       dateIso: new Date().toISOString(),
       categoryId: params.categoryId,
       categoryName: params.categoryName,
-      roundScores: params.roundScores,
-      officialPointsEarned: params.officialPointsEarned,
-      coinsEarned: params.coinsEarnedInMatch,
-      xpEarned: params.xpEarnedInMatch,
-      maxCombo: params.maxComboInMatch,
+      roundScores: safeRoundScores,
+      officialPointsEarned: integrity.safeOfficialPoints,
+      coinsEarned: integrity.safeCoinsEarned,
+      xpEarned: integrity.safeXpEarned,
+      maxCombo: safeMaxCombo,
     };
 
     const updatedRecentIds = [
@@ -3524,7 +3906,7 @@ export class StorageRepository {
       if (m.type === 'play_matches') add = 1;
       if (m.type === 'correct_answers') add = totalCorrectInMatch;
       if (m.type === 'perfect_round') add = perfectRoundsInMatch;
-      if (m.type === 'combo_streak') add = params.combosTriggeredCount;
+      if (m.type === 'combo_streak') add = safeCombosCount;
       return {
         ...m,
         progress: Math.min(m.target, m.progress + add),
@@ -3535,19 +3917,23 @@ export class StorageRepository {
 
     const addPoints = params.alreadySyncedRoundsInMatch
       ? 0
-      : params.officialPointsEarned;
+      : integrity.safeOfficialPoints;
     const addCoins = params.alreadySyncedRoundsInMatch
       ? 0
-      : params.coinsEarnedInMatch;
+      : integrity.safeCoinsEarned;
 
     const nextMonthly = profile.monthlyPoints + addPoints;
+    const nextFairPlay = integrity.tamperDetected
+      ? Math.max(0, (profile.fairPlayScore ?? 100) - 10)
+      : profile.fairPlayScore ?? 100;
 
     const nextProfile: PlayerProfile = {
       ...profile,
       monthlyPoints: nextMonthly,
       monthlyRoundPoints: nextMonthly,
       coins: profile.coins + addCoins,
-      xp: profile.xp + params.xpEarnedInMatch,
+      xp: profile.xp + integrity.safeXpEarned,
+      fairPlayScore: nextFairPlay,
       stats: {
         ...profile.stats,
         matchesPlayed: profile.stats.matchesPlayed + 1,
@@ -3556,7 +3942,7 @@ export class StorageRepository {
         perfectRoundsCount: profile.stats.perfectRoundsCount + perfectRoundsInMatch,
         perfectMatchesCount:
           profile.stats.perfectMatchesCount + (isPerfectMatch ? 1 : 0),
-        maxComboEver: Math.max(profile.stats.maxComboEver, params.maxComboInMatch),
+        maxComboEver: Math.max(profile.stats.maxComboEver, safeMaxCombo),
         categoryPlays: {
           ...profile.stats.categoryPlays,
           [params.categoryId]: prevCatCount + 1,
@@ -3574,12 +3960,12 @@ export class StorageRepository {
   }
 
   /**
-   * Real-time listener (`onSnapshot`) for the Live Monthly Leaderboard from `leaderboard_public` collection
-   * (containing only non-sensitive public fields) ordered descending by `monthlyRoundPoints`.
+   * Stable real-time listener (`onSnapshot`) for raw Cloud Leaderboard entries from `leaderboard_public`
+   * ordered descending by `monthlyRoundPoints`. Does NOT depend on a volatile `profile` object
+   * reference so components subscribe ONCE without re-subscribing or jittering.
    */
-  public subscribeToLiveLeaderboard(
-    currentProfile: PlayerProfile,
-    onUpdate: (entries: LeaderboardEntry[], isLiveCloud: boolean) => void
+  public subscribeToLiveLeaderboardRaw(
+    onUpdate: (cloudEntries: LeaderboardEntry[], isLiveCloud: boolean) => void
   ): Unsubscribe {
     const publicLeaderboardRef = collection(db, 'leaderboard_public');
     const q = query(
@@ -3614,24 +4000,34 @@ export class StorageRepository {
             rankTitle: d.rankTitle || 'مبتدئ واعد',
             rankTitleEn: d.rankTitleEn || 'Rising Challenger',
             vipTier: (d.vipTier as VipTier) || 'none',
-            isCurrentUser:
-              d.playerId === currentProfile.playerId ||
-              (Boolean(currentProfile.uid) && d.uid === currentProfile.uid),
+            isCurrentUser: false,
           };
         });
 
         this.cloudLeaderboardCache = cloudEntries;
-        const merged = this.mergeLeaderboardEntries(currentProfile, cloudEntries);
-        onUpdate(merged, true);
+        onUpdate(cloudEntries, true);
       },
       (error) => {
         handleFirestoreError(error, OperationType.LIST, 'leaderboard_public');
-        onUpdate(this.getLeaderboardWithUser(currentProfile), false);
+        onUpdate(this.cloudLeaderboardCache, false);
       }
     );
   }
 
-  private mergeLeaderboardEntries(
+  /**
+   * Real-time listener (`onSnapshot`) for the Live Monthly Leaderboard from `leaderboard_public` collection
+   * (containing only non-sensitive public fields) ordered descending by `monthlyRoundPoints`.
+   */
+  public subscribeToLiveLeaderboard(
+    currentProfile: PlayerProfile,
+    onUpdate: (entries: LeaderboardEntry[], isLiveCloud: boolean) => void
+  ): Unsubscribe {
+    return this.subscribeToLiveLeaderboardRaw((cloudEntries, isLiveCloud) => {
+      onUpdate(this.mergeLeaderboardEntries(currentProfile, cloudEntries), isLiveCloud);
+    });
+  }
+
+  public mergeLeaderboardEntries(
     profile: PlayerProfile,
     cloudEntries: LeaderboardEntry[]
   ): LeaderboardEntry[] {
@@ -3647,7 +4043,9 @@ export class StorageRepository {
     for (const entry of cloudEntries) {
       byPlayerId.set(entry.playerId, {
         ...entry,
-        isCurrentUser: entry.playerId === profile.playerId,
+        isCurrentUser:
+          entry.playerId === profile.playerId ||
+          (Boolean(profile.uid) && entry.uid === profile.uid),
       });
     }
 

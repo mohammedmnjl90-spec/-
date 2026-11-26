@@ -7,6 +7,7 @@ import {
   signInWithEmailAndPassword,
   sendPasswordResetEmail,
   signOut,
+  updateProfile,
   User,
 } from 'firebase/auth';
 import {
@@ -18,6 +19,7 @@ import {
   Firestore,
 } from 'firebase/firestore';
 import { ErrorCategory, globalErrorHandler } from './utils/globalErrorHandler';
+import { normalizePhoneForAuth } from './utils/phoneUtils';
 
 /**
  * مفاتيح الربط الحقيقية لمشروع Firebase: waled-alsh
@@ -52,6 +54,7 @@ export {
   signInWithEmailAndPassword,
   sendPasswordResetEmail,
   signOut,
+  updateProfile,
 };
 
 export enum OperationType {
@@ -89,27 +92,10 @@ export function phoneToSyntheticEmail(
   dialCode: string,
   rawPhone: string
 ): { syntheticEmail: string; normalizedPhone: string } {
-  const cleanDialDigits = dialCode.replace(/\D/g, '');
-  let cleanLocalDigits = rawPhone.replace(/\D/g, '');
-
-  // If the user typed the country code again inside rawPhone, strip the duplicate prefix
-  if (
-    cleanDialDigits &&
-    cleanLocalDigits.startsWith(cleanDialDigits) &&
-    cleanLocalDigits.length > cleanDialDigits.length + 5
-  ) {
-    cleanLocalDigits = cleanLocalDigits.slice(cleanDialDigits.length);
-  }
-
-  // Strip a single leading trunk zero (e.g., 077... -> 77...) for consistent matching
-  if (cleanLocalDigits.startsWith('0') && cleanLocalDigits.length > 7) {
-    cleanLocalDigits = cleanLocalDigits.replace(/^0+/, '');
-  }
-
-  const fullDigits = `${cleanDialDigits}${cleanLocalDigits}`;
+  const normalized = normalizePhoneForAuth(dialCode, rawPhone);
   return {
-    syntheticEmail: `phone_${fullDigits}@neurox.app`,
-    normalizedPhone: `+${fullDigits}`,
+    syntheticEmail: normalized.syntheticEmail,
+    normalizedPhone: normalized.normalizedPhone,
   };
 }
 

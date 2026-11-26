@@ -2,11 +2,27 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 @layer base {
+  html {
+    overflow-x: hidden;
+    overscroll-behavior-y: contain;
+    -webkit-tap-highlight-color: transparent;
+    scroll-behavior: smooth;
+  }
+
   body {
     font-family: 'Cairo', system-ui, -apple-system, sans-serif;
     background-color: #080C16;
     color: #F8FAFC;
     overflow-x: hidden;
+    overscroll-behavior-y: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  button,
+  input,
+  textarea,
+  select {
+    touch-action: manipulation;
   }
 
   .font-mono-num {

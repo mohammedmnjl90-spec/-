@@ -1,11 +1,17 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { AppLanguage, CountryInfo, PlayerProfile } from '../types/game';
-import { COUNTRIES_LIST, filterCountriesByQuery } from '../data/countries';
+import { COUNTRIES_LIST, filterCountriesByQuery, getCountryByCode } from '../data/countries';
 import { CloudSyncStatus, storageRepo } from '../services/storageRepository';
-import { phoneToSyntheticEmail } from '../firebaseConfig';
+import { auth } from '../firebaseConfig';
 import { soundEngine } from '../utils/sound';
 import { getCountryDisplayName, tr } from '../utils/i18n';
 import { globalErrorHandler } from '../utils/globalErrorHandler';
+import {
+  COUNTRY_PHONE_RULES,
+  extractAsciiDigits,
+  parsePhoneInputNonDestructive,
+  validatePhoneForAuth,
+} from '../utils/phoneUtils';
 import {
   AlertCircle,
   CheckCircle2,
@@ -24,187 +30,27 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 
-interface CountryPhoneRule {
-  subscriberLength: number;
-  validStartDigits?: string[];
-  exampleLocal: string;
-}
-
-const COUNTRY_PHONE_RULES: Record<string, CountryPhoneRule> = {
-  '+967': { subscriberLength: 9, validStartDigits: ['7'], exampleLocal: '770000000' }, // Yemen
-  '+966': { subscriberLength: 9, validStartDigits: ['5'], exampleLocal: '500000000' }, // Saudi Arabia
-  '+20': { subscriberLength: 10, validStartDigits: ['1'], exampleLocal: '1000000000' }, // Egypt
-  '+971': { subscriberLength: 9, validStartDigits: ['5'], exampleLocal: '500000000' }, // UAE
-  '+965': { subscriberLength: 8, validStartDigits: ['5', '6', '9', '4'], exampleLocal: '50000000' }, // Kuwait
-  '+974': { subscriberLength: 8, validStartDigits: ['3', '5', '6', '7'], exampleLocal: '33000000' }, // Qatar
-  '+968': { subscriberLength: 8, validStartDigits: ['7', '9'], exampleLocal: '90000000' }, // Oman
-  '+973': { subscriberLength: 8, validStartDigits: ['3', '6'], exampleLocal: '33000000' }, // Bahrain
-  '+962': { subscriberLength: 9, validStartDigits: ['7'], exampleLocal: '790000000' }, // Jordan
-  '+964': { subscriberLength: 10, validStartDigits: ['7'], exampleLocal: '7700000000' }, // Iraq
-};
-
 /**
- * Detects if a user pasted/typed an international prefix (`+967...` or `00967...`)
- * and returns the matched CountryInfo + remaining subscriber digits.
+ * Backwards-compatible exports backed by the shared non-destructive phoneUtils module.
  */
 export function parseInternationalPhoneInput(
   rawValue: string,
   currentCountry: CountryInfo
 ): { matchedCountry: CountryInfo; cleanSubscriberInput: string } {
-  const trimmed = rawValue.trim();
-  const hasIntlPrefix = trimmed.startsWith('+') || trimmed.startsWith('00');
-  const digitsOnly = trimmed.replace(/\D/g, '');
-
-  if (hasIntlPrefix) {
-    const withoutZeroZero = trimmed.startsWith('00')
-      ? digitsOnly.slice(2)
-      : digitsOnly;
-
-    // Sort countries by dialCode length descending so +967 matches before +96
-    const sortedCountries = [...COUNTRIES_LIST].sort(
-      (a, b) => b.dialCode.replace(/\D/g, '').length - a.dialCode.replace(/\D/g, '').length
-    );
-
-    for (const c of sortedCountries) {
-      const codeDigits = c.dialCode.replace(/\D/g, '');
-      if (codeDigits && withoutZeroZero.startsWith(codeDigits)) {
-        const subscriberPart = withoutZeroZero.slice(codeDigits.length);
-        return {
-          matchedCountry: c,
-          cleanSubscriberInput: subscriberPart,
-        };
-      }
-    }
-  }
-
+  const parsed = parsePhoneInputNonDestructive(rawValue, currentCountry);
   return {
-    matchedCountry: currentCountry,
-    cleanSubscriberInput: digitsOnly,
+    matchedCountry: parsed.matchedCountry,
+    cleanSubscriberInput: parsed.displayValue,
   };
 }
 
-/**
- * Validates a raw mobile number + country dial code in real-time according to
- * E.164 international format (`+[1-9]\d{7,14}`) and country rules, and transforms it
- * into the canonical `phone_<digits>@neurox.app` synthetic email format for Firebase Auth.
- */
 export function validateAndTransformPhoneForAuth(
   dialCode: string,
   rawPhone: string,
-  lang: AppLanguage
-):
-  | {
-      valid: true;
-      syntheticEmail: string;
-      normalizedPhone: string;
-      subscriberDigits: string;
-    }
-  | {
-      valid: false;
-      error: string;
-      previewSyntheticEmail?: string;
-    } {
-  const cleanDialDigits = dialCode.replace(/\D/g, '');
-  let subscriberDigits = rawPhone.replace(/\D/g, '');
-
-  if (!subscriberDigits) {
-    const rule = COUNTRY_PHONE_RULES[dialCode];
-    const example = rule ? `${dialCode}${rule.exampleLocal}` : `${dialCode}500000000`;
-    return {
-      valid: false,
-      error: tr(
-        lang,
-        `أدخل رقم الجوال بالصيغة الدولية المعتمدة (مثال: ${example}).`,
-        `Enter mobile number in international format (e.g., ${example}).`
-      ),
-    };
-  }
-
-  // Strip duplicate country dial code if pasted inside rawPhone
-  if (
-    cleanDialDigits &&
-    subscriberDigits.startsWith(cleanDialDigits) &&
-    subscriberDigits.length > cleanDialDigits.length + 5
-  ) {
-    subscriberDigits = subscriberDigits.slice(cleanDialDigits.length);
-  }
-
-  // Strip leading trunk zero (e.g., 077... -> 77...)
-  if (subscriberDigits.startsWith('0')) {
-    subscriberDigits = subscriberDigits.replace(/^0+/, '');
-  }
-
-  const { syntheticEmail, normalizedPhone } = phoneToSyntheticEmail(
-    dialCode,
-    subscriberDigits
-  );
-
-  // Check country-specific rule if defined
-  const countryRule = COUNTRY_PHONE_RULES[dialCode];
-  if (countryRule) {
-    if (
-      countryRule.validStartDigits &&
-      subscriberDigits.length > 0 &&
-      !countryRule.validStartDigits.some((prefix) => subscriberDigits.startsWith(prefix))
-    ) {
-      return {
-        valid: false,
-        previewSyntheticEmail: syntheticEmail,
-        error: tr(
-          lang,
-          `رقم الجوال للدولة (${dialCode}) يجب أن يبدأ بـ (${countryRule.validStartDigits.join(' أو ')}) بدون الصفر الابتدائي (مثال: ${dialCode}${countryRule.exampleLocal}).`,
-          `Mobile number for (${dialCode}) must start with (${countryRule.validStartDigits.join(' or ')}) without leading zero (e.g., ${dialCode}${countryRule.exampleLocal}).`
-        ),
-      };
-    }
-
-    if (subscriberDigits.length !== countryRule.subscriberLength) {
-      return {
-        valid: false,
-        previewSyntheticEmail: syntheticEmail,
-        error: tr(
-          lang,
-          `الصيغة الدولية للدولة (${dialCode}) تتطلب ${countryRule.subscriberLength} أرقام بعد مفتاح الدولة (المدخل حالياً: ${subscriberDigits.length}). مثال: ${dialCode}${countryRule.exampleLocal}`,
-          `International format for (${dialCode}) requires ${countryRule.subscriberLength} digits after country code (currently ${subscriberDigits.length}). Example: ${dialCode}${countryRule.exampleLocal}`
-        ),
-      };
-    }
-  } else {
-    // General ITU-T E.164 international phone validation (6 to 12 subscriber digits, 8 to 15 total digits)
-    if (subscriberDigits.length < 6 || subscriberDigits.length > 12) {
-      return {
-        valid: false,
-        previewSyntheticEmail: syntheticEmail,
-        error: tr(
-          lang,
-          `يرجى إدخال رقم جوال دولي صحيح (${dialCode} متبوعاً بـ 6 إلى 12 رقماً).`,
-          `Please enter a valid international mobile number (${dialCode} followed by 6 to 12 digits).`
-        ),
-      };
-    }
-  }
-
-  const e164Regex = /^\+[1-9][0-9]{7,14}$/;
-  const syntheticPattern = /^phone_[1-9][0-9]{7,14}@neurox\.app$/;
-
-  if (!e164Regex.test(normalizedPhone) || !syntheticPattern.test(syntheticEmail)) {
-    return {
-      valid: false,
-      previewSyntheticEmail: syntheticEmail,
-      error: tr(
-        lang,
-        'يرجى التأكد من إدخال رقم جوال صحيح مع مفتاح الدولة.',
-        'Please make sure to enter a valid mobile number with country code.'
-      ),
-    };
-  }
-
-  return {
-    valid: true,
-    syntheticEmail,
-    normalizedPhone,
-    subscriberDigits,
-  };
+  lang: AppLanguage,
+  mode: 'register' | 'login' = 'register'
+) {
+  return validatePhoneForAuth(dialCode, rawPhone, lang, mode);
 }
 
 /**
@@ -267,9 +113,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [isRegistering, setIsRegistering] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // Login state (Email or Phone + Password)
-  const [loginMethod, setLoginMethod] = useState<'phone' | 'email'>('phone');
-  const [loginCountry, setLoginCountry] = useState<CountryInfo>(COUNTRIES_LIST[0]);
+  // Login state (Email or Phone + Password) — default country to most recent saved account if available
+  const [loginMethod, setLoginMethod] = useState<'phone' | 'email'>(() => {
+    const firstAcc = storageRepo.loadAllSavedAccounts()[0];
+    return firstAcc?.contactType === 'email' ? 'email' : 'phone';
+  });
+  const [loginCountry, setLoginCountry] = useState<CountryInfo>(() => {
+    const firstAcc = storageRepo.loadAllSavedAccounts()[0];
+    if (firstAcc?.country?.code) {
+      return getCountryByCode(firstAcc.country.code) || firstAcc.country;
+    }
+    return COUNTRIES_LIST[0];
+  });
   const [showLoginCountryPicker, setShowLoginCountryPicker] = useState(false);
   const [loginCountrySearch, setLoginCountrySearch] = useState('');
   const [loginPhoneInput, setLoginPhoneInput] = useState('');
@@ -280,6 +135,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [showLoginPassword, setShowLoginPassword] = useState(false);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
+  const loginPasswordInputRef = useRef<HTMLInputElement | null>(null);
 
   // Forgot Password state
   const [resetEmailInput, setResetEmailInput] = useState('');
@@ -294,7 +150,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   // Real-time validation & internal transformation (`phone_xxx@neurox.app`) for Registration
   const registerPhoneValidation = useMemo(
     () =>
-      validateAndTransformPhoneForAuth(selectedCountry.dialCode, phoneInput, lang),
+      validatePhoneForAuth(selectedCountry.dialCode, phoneInput, lang, 'register'),
     [selectedCountry.dialCode, phoneInput, lang]
   );
 
@@ -303,10 +159,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     [emailInput, lang]
   );
 
-  // Real-time validation & internal transformation (`phone_xxx@neurox.app`) for Login
+  // Real-time validation & internal transformation (`phone_xxx@neurox.app`) for Login (flexible E.164)
   const loginPhoneValidation = useMemo(
     () =>
-      validateAndTransformPhoneForAuth(loginCountry.dialCode, loginPhoneInput, lang),
+      validatePhoneForAuth(loginCountry.dialCode, loginPhoneInput, lang, 'login'),
     [loginCountry.dialCode, loginPhoneInput, lang]
   );
 
@@ -318,21 +174,21 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const handleRegisterPhoneChange = (rawVal: string) => {
     setPhoneTouched(true);
     if (errorMsg) setErrorMsg(null);
-    const parsed = parseInternationalPhoneInput(rawVal, selectedCountry);
+    const parsed = parsePhoneInputNonDestructive(rawVal, selectedCountry);
     if (parsed.matchedCountry.code !== selectedCountry.code) {
       setSelectedCountry(parsed.matchedCountry);
     }
-    setPhoneInput(parsed.cleanSubscriberInput);
+    setPhoneInput(parsed.displayValue);
   };
 
   const handleLoginPhoneChange = (rawVal: string) => {
     setLoginPhoneTouched(true);
     if (loginError) setLoginError(null);
-    const parsed = parseInternationalPhoneInput(rawVal, loginCountry);
+    const parsed = parsePhoneInputNonDestructive(rawVal, loginCountry);
     if (parsed.matchedCountry.code !== loginCountry.code) {
       setLoginCountry(parsed.matchedCountry);
     }
-    setLoginPhoneInput(parsed.cleanSubscriberInput);
+    setLoginPhoneInput(parsed.displayValue);
   };
 
   const handleRegisterSubmit = async (e: React.FormEvent) => {
@@ -942,6 +798,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               <div className="relative" dir="ltr">
                 <Lock className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
                 <input
+                  ref={loginPasswordInputRef}
                   type={showLoginPassword ? 'text' : 'password'}
                   value={loginPassword}
                   onChange={(e) => {
@@ -1031,13 +888,56 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     <button
                       type="button"
                       onClick={() => {
-                        soundEngine.playReward();
-                        const synced = storageRepo.loginByIdentifier(acc.playerId);
-                        if (synced) onAuthSuccess(synced);
+                        soundEngine.playClick();
+                        // If Firebase Auth is already authenticated as this exact account, hydrate and enter directly
+                        if (auth.currentUser && acc.uid && auth.currentUser.uid === acc.uid) {
+                          const synced = storageRepo.loginByIdentifier(acc.playerId);
+                          if (synced) {
+                            soundEngine.playReward();
+                            onAuthSuccess(synced);
+                          }
+                          return;
+                        }
+
+                        // Otherwise, pre-fill the real Sign-In form so Firebase Auth authenticates properly
+                        // and loads the full cloud profile & username immediately
+                        setLoginError(null);
+                        if (acc.contactType === 'email' && (acc.email || acc.contactValue)) {
+                          setLoginMethod('email');
+                          setLoginEmailInput(acc.email || acc.contactValue || '');
+                          setLoginEmailTouched(true);
+                        } else {
+                          setLoginMethod('phone');
+                          const accCountry =
+                            getCountryByCode(acc.country.code) || acc.country || COUNTRIES_LIST[0];
+                          setLoginCountry(accCountry);
+                          const rawSavedPhone = acc.phone || acc.contactValue || '';
+                          const dialDigits = extractAsciiDigits(accCountry.dialCode);
+                          let localSub = extractAsciiDigits(rawSavedPhone);
+                          if (
+                            dialDigits &&
+                            localSub.startsWith(dialDigits) &&
+                            localSub.length > dialDigits.length
+                          ) {
+                            localSub = localSub.slice(dialDigits.length);
+                          }
+                          setLoginPhoneInput(localSub || rawSavedPhone);
+                          setLoginPhoneTouched(true);
+                        }
+                        setResetSuccessMsg(
+                          tr(
+                            lang,
+                            `تم تعبئة بيانات حساب «${acc.username}» — أدخل كلمة المرور لتسجيل الدخول.`,
+                            `Filled credentials for "${acc.username}" — enter your password to sign in.`
+                          )
+                        );
+                        window.setTimeout(() => {
+                          loginPasswordInputRef.current?.focus();
+                        }, 60);
                       }}
                       className="px-4 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-extrabold text-xs cursor-pointer whitespace-nowrap shrink-0"
                     >
-                      {tr(lang, 'دخول', 'Enter')}
+                      {tr(lang, 'اختيار', 'Select')}
                     </button>
                   </div>
                 ))}

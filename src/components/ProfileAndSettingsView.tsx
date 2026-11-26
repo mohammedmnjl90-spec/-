@@ -61,6 +61,12 @@ export const ProfileAndSettingsView: React.FC<ProfileAndSettingsViewProps> = ({
     null
   );
 
+  // Sync identity inputs ONLY when switching to a different account (never during typing)
+  React.useEffect(() => {
+    setEditUsername(profile.username);
+    setEditCountry(profile.country);
+  }, [profile.playerId, profile.uid]);
+
   const levelInfo = calculateLevelAndRank(profile.xp);
   const remainingCooldownDays = getIdentityChangeCooldownDays(profile.lastIdentityChangeAt);
   const isIdentityLocked = remainingCooldownDays > 0;

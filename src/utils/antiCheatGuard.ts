@@ -137,6 +137,97 @@ export class AntiCheatGuard {
     };
   }
 
+  private committedEventKeys: Set<string> = new Set();
+
+  /**
+   * Prevents duplicate processing of the same round or match completion event
+   * (e.g., rapid double-taps or post-reconnect retries).
+   * Returns true if this is a brand-new event and marks it committed; false if duplicate.
+   */
+  public claimUniqueEvent(eventKey: string): boolean {
+    const cleanKey = eventKey.trim();
+    if (!cleanKey) return true;
+    if (this.committedEventKeys.has(cleanKey)) {
+      return false;
+    }
+    this.committedEventKeys.add(cleanKey);
+    // Keep memory bounded to last 200 events
+    if (this.committedEventKeys.size > 200) {
+      const oldest = this.committedEventKeys.values().next().value;
+      if (oldest) this.committedEventKeys.delete(oldest);
+    }
+    return true;
+  }
+
+  /**
+   * Deterministic server-matching round official points calculation:
+   * 6/6 -> 2 pts, 4-5/6 -> 1 pt, <=3/6 -> 0 pts.
+   */
+  public computeExpectedRoundPoints(correctOutOfSix: number): number {
+    const safeCorrect = Number.isFinite(correctOutOfSix)
+      ? Math.max(0, Math.min(6, Math.floor(correctOutOfSix)))
+      : 0;
+    if (safeCorrect === 6) return 2;
+    if (safeCorrect > 3) return 1;
+    return 0;
+  }
+
+  /**
+   * Validates and clamps a full 3-round match payload so scores, official points,
+   * coins, and XP remain mathematically consistent and tamper-proof.
+   */
+  public validateMatchIntegrity(params: {
+    roundScores: [number, number, number];
+    officialPointsEarned: number;
+    coinsEarnedInMatch: number;
+    xpEarnedInMatch: number;
+    coinsPerOfficialPoint: number;
+  }): {
+    safeRoundScores: [number, number, number];
+    safeOfficialPoints: number;
+    safeCoinsEarned: number;
+    safeXpEarned: number;
+    tamperDetected: boolean;
+  } {
+    const safeRoundScores: [number, number, number] = [
+      Math.max(0, Math.min(6, Math.floor(Number(params.roundScores[0]) || 0))),
+      Math.max(0, Math.min(6, Math.floor(Number(params.roundScores[1]) || 0))),
+      Math.max(0, Math.min(6, Math.floor(Number(params.roundScores[2]) || 0))),
+    ];
+
+    const expectedOfficialPoints =
+      this.computeExpectedRoundPoints(safeRoundScores[0]) +
+      this.computeExpectedRoundPoints(safeRoundScores[1]) +
+      this.computeExpectedRoundPoints(safeRoundScores[2]);
+
+    const reportedPoints = Number.isFinite(params.officialPointsEarned)
+      ? Math.max(0, Math.floor(params.officialPointsEarned))
+      : 0;
+
+    const tamperDetected = reportedPoints > expectedOfficialPoints;
+    const safeOfficialPoints = Math.min(expectedOfficialPoints, reportedPoints);
+
+    const maxLegalCoins = safeOfficialPoints * Math.max(5, Math.min(15, params.coinsPerOfficialPoint));
+    const safeCoinsEarned = Math.max(
+      0,
+      Math.min(maxLegalCoins, Math.floor(Number(params.coinsEarnedInMatch) || 0))
+    );
+
+    // Max XP per match: 18 correct * 10 + 6 combos * 15 + 6 official pts * 20 = 390
+    const safeXpEarned = Math.max(
+      0,
+      Math.min(450, Math.floor(Number(params.xpEarnedInMatch) || 0))
+    );
+
+    return {
+      safeRoundScores,
+      safeOfficialPoints,
+      safeCoinsEarned,
+      safeXpEarned,
+      tamperDetected,
+    };
+  }
+
   /**
    * Enforces the Firestore rule constraint: maximum +2 official points per single round update.
    */
