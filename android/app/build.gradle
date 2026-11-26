@@ -58,8 +58,6 @@ android {
                 storePassword releaseStorePassword
                 keyAlias releaseKeyAlias
                 keyPassword releaseKeyPassword
-                v1SigningEnabled true
-                v2SigningEnabled true
             }
         }
     }
@@ -72,7 +70,6 @@ android {
             debuggable false
             minifyEnabled false
             shrinkResources false
-            zipAlignEnabled true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             if (hasReleaseSigning) {
                 signingConfig signingConfigs.release

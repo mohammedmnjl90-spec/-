@@ -79,7 +79,17 @@ jobs:
           bun run build
 
       - name: Sync Web Assets into Capacitor Android Project
-        run: bunx cap sync android
+        run: |
+          if [ ! -d "android" ]; then
+            bunx cap add android
+          fi
+          bunx cap sync android
+
+      - name: Accept Android SDK Licenses
+        run: |
+          if [ -n "$ANDROID_HOME" ] && [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          fi
 
       - name: Inject google-services.json (Optional Firebase Native Config)
         if: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 != '' }}
@@ -112,7 +122,8 @@ jobs:
           ./gradlew bundleRelease \
             -PversionCode=${{ steps.version.outputs.code }} \
             -PversionName=${{ steps.version.outputs.name }} \
-            --no-daemon
+            --no-daemon --stacktrace
+          ls -lh app/build/outputs/bundle/release/app-release.aab
 
       - name: Verify AAB Signature (When Signing Enabled)
         if: ${{ steps.signing.outputs.signed == 'true' }}
