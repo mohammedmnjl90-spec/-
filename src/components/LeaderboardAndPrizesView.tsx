@@ -176,9 +176,8 @@ export const LeaderboardAndPrizesView: React.FC<LeaderboardAndPrizesViewProps> =
         </div>
       </div>
 
-      {/* 2. Sticky Native-App Sub-Navigation & Current Rank Summary */}
-      <div className="sticky top-[62px] z-20 -mx-1 px-1 py-2 bg-[#080C16]/92 backdrop-blur-md border-b border-slate-800/60">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+      {/* 2. Sub-Navigation & Current Rank Summary */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
           <div className="grid grid-cols-2 sm:inline-flex p-1 rounded-xl bg-[#111827] border border-slate-800 w-full sm:w-auto">
             <button
               type="button"
@@ -225,7 +224,6 @@ export const LeaderboardAndPrizesView: React.FC<LeaderboardAndPrizesViewProps> =
               </span>
             </span>
           </div>
-        </div>
       </div>
 
       {subTab === 'ranking' ? (
