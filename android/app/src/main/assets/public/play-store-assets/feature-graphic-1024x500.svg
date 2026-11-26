@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 500" width="1024" height="500" fill="none">
+  <defs>
+    <linearGradient id="fbg" x1="0" y1="0" x2="1024" y2="500" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#050915"/>
+      <stop offset="50%" stop-color="#0D1935"/>
+      <stop offset="100%" stop-color="#060A14"/>
+    </linearGradient>
+    <radialGradient id="fglow" cx="50%" cy="40%" r="55%">
+      <stop offset="0%" stop-color="#F59E0B" stop-opacity="0.34"/>
+      <stop offset="50%" stop-color="#0EA5E9" stop-opacity="0.14"/>
+      <stop offset="100%" stop-color="#050915" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="fgold" x1="412" y1="80" x2="612" y2="280" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FEF08A"/>
+      <stop offset="50%" stop-color="#F59E0B"/>
+      <stop offset="100%" stop-color="#B45309"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="500" fill="url(#fbg)"/>
+  <rect width="1024" height="500" fill="url(#fglow)"/>
+  <path d="M180 500V250C180 120 340 45 512 28C684 45 844 120 844 250V500" stroke="#F59E0B" stroke-opacity="0.35" stroke-width="2"/>
+  <path d="M260 500V270C260 165 385 100 512 85C639 100 764 165 764 270V500" stroke="#38BDF8" stroke-opacity="0.25" stroke-width="1.5"/>
+  <path d="M0 440L210 295L340 365L512 215L684 365L814 295L1024 440V500H0V440Z" fill="#0B1325" stroke="#F59E0B" stroke-opacity="0.4" stroke-width="2"/>
+  <g transform="translate(432,76)">
+    <rect x="26" y="26" width="108" height="108" rx="18" fill="#0D172E" stroke="url(#fgold)" stroke-width="3"/>
+    <rect x="26" y="26" width="108" height="108" rx="18" transform="rotate(45 80 80)" fill="#0D172E" fill-opacity="0.92" stroke="url(#fgold)" stroke-width="2.5"/>
+    <circle cx="80" cy="80" r="46" fill="#091020" stroke="#38BDF8" stroke-opacity="0.5" stroke-width="1.5"/>
+    <path d="M52 80L58 54L72 68L80 46L88 68L102 54L108 80H52Z" fill="url(#fgold)"/>
+    <rect x="52" y="84" width="56" height="7" rx="3.5" fill="url(#fgold)"/>
+  </g>
+  <text x="512" y="346" text-anchor="middle" fill="#FFFFFF" font-family="Cairo, sans-serif" font-size="56" font-weight="900">قمة التحدي</text>
+  <text x="512" y="394" text-anchor="middle" fill="#FDE68A" font-family="Cairo, sans-serif" font-size="22" font-weight="700">ساحة الأبطال للمسابقات الثقافية التنافسية</text>
+</svg>

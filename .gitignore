@@ -7,3 +7,11 @@ coverage/
 logs/
 .env*
 !.env.example
+
+# Android signing secrets & local build artifacts (NEVER commit to Git)
+*.jks
+*.keystore
+*.p12
+android/keystore.properties
+android/local.properties
+android/app/google-services.json

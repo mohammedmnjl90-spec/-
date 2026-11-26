@@ -1,0 +1,22 @@
+{
+  "name": "قمة التحدي - ساحة الأبطال للمسابقات الثقافية",
+  "short_name": "قمة التحدي",
+  "description": "اختبر سرعة بديهتك، اجمع النقاط، وتصدّر قائمة الأوائل في قمة التحدي عبر أكثر من 12 قسماً ثقافياً وعلمياً.",
+  "lang": "ar",
+  "dir": "rtl",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#080C16",
+  "theme_color": "#080C16",
+  "categories": ["games", "trivia", "education"],
+  "icons": [
+    {
+      "src": "/play-store-assets/app-icon-512.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

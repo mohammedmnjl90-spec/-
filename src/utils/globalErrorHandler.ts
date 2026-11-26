@@ -268,6 +268,12 @@ class GlobalErrorHandler {
     if (typeof window === 'undefined' || typeof fetch !== 'function') {
       return;
     }
+    const maybeCap = (window as Window & { Capacitor?: { isNativePlatform?: () => boolean } })
+      .Capacitor;
+    if (maybeCap?.isNativePlatform?.()) {
+      // Native Capacitor Android bundles static dist/ without a local Express /api server
+      return;
+    }
     if (typeof navigator !== 'undefined' && navigator.onLine === false) {
       return;
     }

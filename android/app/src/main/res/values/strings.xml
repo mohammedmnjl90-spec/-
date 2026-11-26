@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">قمة التحدي</string>
+    <string name="title_activity_main">قمة التحدي</string>
+    <string name="package_name">com.midan.almarifa</string>
+    <string name="custom_url_scheme">com.midan.almarifa</string>
+</resources>

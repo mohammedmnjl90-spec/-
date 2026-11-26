@@ -1,79 +1,115 @@
-# دليل نشر تطبيق «قمة التحدي» على متجر Google Play
+# دليل تجهيز ونشر تطبيق «ميدان المعرفة / قمة التحدي» على متجر Google Play
 
-هذا الدليل يوضح جميع الخطوات العملية لنشر التطبيق بصيغة **AAB موقّعة**، وتفعيل **الاشتراكات والدفع الحقيقي (Google Play Billing)**، وتفعيل **الإعلانات الحقيقية (Google AdMob)**.
-
----
-
-## 1) الملفات الجاهزة داخل المشروع
-- `capacitor.config.json`: إعدادات التطبيق الإنتاجية (`com.midan.almarifa`، اسم التطبيق، شاشة البداية، وشريط الحالة).
-- `.github/workflows/build-playstore-release.yml`: مسار بناء أوتوماتيكي لإنتاج ملف **`app-release.aab`** الموقّع المطلوب لمتجر Google Play.
-- `public/privacy-policy.html`: صفحة سياسة خصوصية كاملة بالعربية والإنجليزية (ارفع رابطها في Play Console).
-- `public/manifest.webmanifest`: ملف تعريف التطبيق.
-- `public/app-ads.txt`: ملف توثيق AdMob (استبدل `pub-0000000000000000` بمعرّف الناشر الخاص بك).
-- `public/play-store-assets/app-icon-512.svg` و `public/play-store-assets/feature-graphic-1024x500.svg`: الأيقونة والبانر الترويجي (قم بتصديرهما إلى PNG بدقة `512×512` و `1024×500` عند الرفع في Play Console).
-- `src/services/nativePlayBridge.ts`: جسر الربط الجاهز مع إضافات Capacitor الأصلية لكل من AdMob وGoogle Play Billing.
-- `src/services/vipServerVerification.ts`: يحتوي على كود Cloud Function جاهز للتحقق من إيصالات الشراء على السيرفر.
+تم تجهيز مجلد `android/` بالكامل باستخدام **Capacitor 7** مع إعدادات **Gradle** الإنتاجية، التوقيع الرقمي الآمن، دعم بناء ملف **Android App Bundle (`.aab`)**، ومسار **GitHub Actions** تلقائي.
 
 ---
 
-## 2) تجهيز التوقيع الرقمي (Keystore) وبناء ملف `.aab`
-1. أنشئ مفتاح التوقيع مرة واحدة واحتفظ به في مكان آمن جداً:
-   ```bash
-   keytool -genkey -v -keystore release-keystore.jks -keyalg RSA -keysize 2048 -validity 10000 -alias qimat_key
-   ```
-2. حوّله إلى نص Base64:
-   ```bash
-   base64 -w 0 release-keystore.jks
-   ```
-3. في مستودع GitHub (`Settings -> Secrets and variables -> Actions`) أضف الأسرار التالية:
-   - `ANDROID_KEYSTORE_BASE64`: ناتج الأمر السابق
-   - `ANDROID_KEYSTORE_PASSWORD`: كلمة مرور ملف Keystore
-   - `ANDROID_KEY_ALIAS`: `qimat_key`
-   - `ANDROID_KEY_PASSWORD`: كلمة مرور المفتاح
-   - `GOOGLE_SERVICES_JSON_BASE64`: محتوى ملف `google-services.json` من Firebase بصيغة Base64
-4. شغّل Workflow باسم **Build Signed Play Store Release (AAB + APK)** من تبويب Actions، وحمّل ملف **`app-release.aab`**.
+## 1) مواصفات مشروع Android الجاهزة
+| الإعداد | القيمة المعتمدة |
+|---|---|
+| **Package ID (معرّف الحزمة الثابت)** | `com.midan.almarifa` |
+| **اسم التطبيق على الهاتف** | `قمة التحدي` (قابل للتعديل من `capacitor.config.json` و`android/app/src/main/res/values/strings.xml`) |
+| **أدنى إصدار Android (`minSdk`)** | API 23 (Android 6.0) |
+| **إصدار البناء والاستهداف (`compileSdk` / `targetSdk`)** | API 35 (Android 15 — متوافق مع أحدث متطلبات Google Play) |
+| **الأذونات (Permissions)** | `INTERNET` و `ACCESS_NETWORK_STATE` فقط (بدون أي أذونات حساسة أو غير ضرورية) |
+| **الأمان** | `usesCleartextTraffic="false"` (HTTPS إلزامي) + `allowBackup="false"` |
+| **دعم AAB اللغوي** | `bundle.language.enableSplit = false` لضمان عمل التبديل الفوري بين العربية والإنجليزية داخل التطبيق |
 
 ---
 
-## 3) تفعيل الاشتراكات والدفع الحقيقي (Google Play Billing)
-1. من **Google Play Console** → اختر تطبيقك → **Monetize (تحقيق الربح)**:
-   - أنشئ حساب تاجر (**Payments Profile**) واربط حسابك البنكي.
-   - من **Subscriptions (الاشتراكات)** أنشئ 3 اشتراكات شهرية بنفس المعرّفات المستخدمة داخل التطبيق:
-     - `com.qimataltahadi.vip.bronze` (باقة VIP البرونزية)
-     - `com.qimataltahadi.vip.silver` (باقة VIP الفضية)
-     - `com.qimataltahadi.vip.gold` (باقة VIP الذهبية)
-   - من **In-app products (المنتجات داخل التطبيق)** أنشئ باقات العملات:
-     - `pack_coins_250`
-     - `pack_coins_700`
-     - `pack_coins_1800`
-2. في مشروع الأندرويد (Capacitor)، ثبّت إضافة الدفع الأصلية:
-   ```bash
-   npm install @revenuecat/purchases-capacitor
-   npx cap sync android
-   ```
-   (أو `cordova-plugin-purchase` مع الربط المباشر بـ Google Play Billing API).
-3. فعّل التحقق السحابي عبر نشر دالة `verifyVipSubscriptionPurchase` الموجودة داخل `src/services/vipServerVerification.ts` على Firebase Functions مع ربط حساب الخدمة (Google Play Android Developer API) لضمان تفعيل VIP بشكل آمن ضد التلاعب.
+## 2) كيفية إنشاء ملف التوقيع الرقمي (Keystore) وتأمينه
+> **تحذير أمني مهم جداً:** لا ترفع أبداً ملف `release-keystore.jks` أو `keystore.properties` أو أي كلمات مرور داخل مستودع GitHub. تم حظرها بالفعل في `.gitignore` و`android/.gitignore`.
+
+### الخطوة الأولى: إنشاء Keystore على جهازك
+افتح الطرفية (Terminal / PowerShell) مع التأكد من وجود Java JDK (الإصدار 17 أو 21)، ثم نفّذ الأمر التالي:
+
+```bash
+keytool -genkeypair -v \
+  -keystore release-keystore.jks \
+  -keyalg RSA \
+  -keysize 2048 \
+  -validity 10000 \
+  -alias qimat_release_key
+```
+
+سيطلب منك الأمر:
+1. **كلمة مرور Keystore** (اختر كلمة مرور قوية واحفظها في مدير كلمات مرور مثل Bitwarden / 1Password).
+2. بيانات المطور (الاسم، المؤسسة، المدينة، رمز الدولة مثل `SA`).
+3. **كلمة مرور المفتاح (Key Password)** — يُفضّل حفظها بدقة (أو جعلها مطابقة لكلمة مرور Keystore).
+
+### الخطوة الثانية: عمل نسخة احتياطية آمنة
+- احفظ نسخة من `release-keystore.jks` + كلمات المرور في **مكانين آمنين خارج المستودع** (مثلاً Google Drive محمي أو قرص خارجي مشفّر).
+- إذا فُقد مفتاح التوقيع ولم تكن مفعّلاً لـ **Play App Signing** لن تستطيع تحديث التطبيق مستقبلاً. عند أول رفع على Play Console فعّل خيار **Google Play App Signing** الموصى به من جوجل.
+
+### الخطوة الثالثة: تحويل ملف Keystore إلى Base64 لإضافته في GitHub Secrets
+- على **macOS / Linux**:
+  ```bash
+  base64 -w 0 release-keystore.jks > keystore_base64.txt
+  ```
+  *(على macOS استخدم `base64 -i release-keystore.jks | tr -d '\n' > keystore_base64.txt`)*
+- على **Windows PowerShell**:
+  ```powershell
+  [Convert]::ToBase64String([IO.File]::ReadAllBytes("release-keystore.jks")) | Out-File -Encoding ascii keystore_base64.txt
+  ```
+انسخ محتوى `keystore_base64.txt` ثم احذف الملف النصي المؤقت فوراً.
 
 ---
 
-## 4) تفعيل الإعلانات الحقيقية (Google AdMob)
-1. أنشئ حساباً في **[Google AdMob](https://admob.google.com/)** وأضف تطبيق Android جديد.
-2. أنشئ وحدتين إعلانيتين (Ad Units):
-   - **Interstitial (إعلان بيني)** — يظهر تلقائياً في الخلفية عند انتهاء الفاصل الزمني للاعبين غير المشتركين.
-   - **Rewarded (إعلان مكافآت)** — يستخدم لمكافآت العملات أو إنقاذ الجولة.
-3. ثبّت إضافة AdMob لـ Capacitor:
+## 3) إعداد أسرار GitHub Secrets بدون كشف كلمات المرور
+ادخل إلى مستودعك في GitHub ثم اذهب إلى:
+**Settings → Secrets and variables → Actions → New repository secret**
+
+أضف الأسرار الأربعة الإلزامية لتوقيع نسخة Google Play:
+1. `ANDROID_KEYSTORE_BASE64` ← النص الناتج من تحويل `release-keystore.jks` إلى Base64.
+2. `ANDROID_KEYSTORE_PASSWORD` ← كلمة مرور ملف الـ Keystore.
+3. `ANDROID_KEY_ALIAS` ← الاسم المستعار للمفتاح (مثل `qimat_release_key`).
+4. `ANDROID_KEY_PASSWORD` ← كلمة مرور المفتاح.
+
+**أسرار اختيارية (حسب حاجتك):**
+- `GOOGLE_SERVICES_JSON_BASE64`: إذا أضفت تطبيق Android داخل Firebase Console وحمّلت `google-services.json` (حوّله بنفس طريقة Base64).
+- `VITE_ADMOB_ANDROID_APP_ID` و `VITE_ADMOB_INTERSTITIAL_ID` و `VITE_ADMOB_REWARDED_ID`: عند تفعيل إعلانات Google AdMob الحقيقية.
+
+---
+
+## 4) تشغيل البناء التلقائي لملف AAB عبر GitHub Actions
+1. اذهب في GitHub إلى تبويب **Actions**.
+2. اختر المسار: **`Build Play Store Release (Signed AAB)`**.
+3. اضغط **Run workflow**:
+   - أدخل **`version_name`** (مثلاً `1.0.0`).
+   - أدخل **`version_code`** (مثلاً `1`، وزده إلى `2`, `3` مع كل تحديث جديد في Google Play).
+4. بعد انتهاء البناء بنجاح، انزل إلى قسم **Artifacts** وحمّل ملف:
+   `midan-almarifa-playstore-v1.0.0-code1-signed-aab`
+   وستجد بداخله ملف **`app-release.aab`** الموقّع والجاهز مباشرة للرفع في Google Play Console!
+
+*(كما يعمل البناء تلقائياً عند دفع أي Tag يبدأ بـ `v` مثل `git tag v1.0.0 && git push origin v1.0.0`)*
+
+---
+
+## 5) البناء المحلي على جهازك (اختياري)
+إذا أردت بناء ملف `.aab` محلياً عبر Android Studio أو الطرفية:
+1. انسخ `android/keystore.properties.example` إلى `android/keystore.properties` (هذا الملف مستبعد من Git ولن يُرفع).
+2. ضع ملف `release-keystore.jks` داخل `android/app/` وأكمل البيانات داخل `android/keystore.properties`.
+3. شغّل الأمر:
    ```bash
-   npm install @capacitor-community/admob
-   npx cap sync android
+   npm run android:aab
    ```
-4. أضف `AdMob App ID` داخل `android/app/src/main/AndroidManifest.xml`:
-   ```xml
-   <meta-data
-     android:name="com.google.android.gms.ads.APPLICATION_ID"
-     android:value="ca-app-pub-XXXXXXXXXXXXXXXX~YYYYYYYYYY" />
-   ```
-5. أضف معرّفات وحدات الإعلانات في GitHub Secrets:
-   - `VITE_ADMOB_ANDROID_APP_ID`
-   - `VITE_ADMOB_INTERSTITIAL_ID`
-   - `VITE_ADMOB_REWARDED_ID`
-6. ضع معرّف الناشر الحقيقي داخل `public/app-ads.txt` على موقعك الرسمي المربوط بصفحة التطبيق في Play Console.
+4. ستجد الملف الناتج في:
+   `android/app/build/outputs/bundle/release/app-release.aab`
+
+---
+
+## 6) قائمة ما تبقى عليك فعله قبل الرفع على Google Play Console
+1. **إنشاء Keystore وإضافة أسرار GitHub Secrets** الموضّحة أعلاه وتشغيل Workflow للحصول على `app-release.aab` موقّع.
+2. **تجربة التطبيق على هاتف Android حقيقي** (بتثبيت ملف Debug APK من Workflow `Build Android Debug APK` أو عبر Android Studio) للتأكد من تسجيل الدخول، اللعب، حفظ النقاط، المتصدرين، والدردشة.
+3. **التأكد من نشر قواعد `firestore.rules`** في مشروع Firebase (`waled-alsh`) والتحقق من إضافة تطبيق Android (`com.midan.almarifa`) إن كنت ستستخدم خدمات Android الأصلية.
+4. **فتح حساب مطوّر Google Play Console** (رسوم مرة واحدة 25$) وإنشاء تطبيق جديد بمعرّف الحزمة `com.midan.almarifa`.
+5. **رفع أصول المتجر في Store Listing**:
+   - الأيقونة الجاهزة: `public/play-store-assets/app-icon-512.png` (بدقة 512×512 PNG).
+   - البانر الترويجي (`Feature Graphic` 1024×500 PNG — يمكن تصديره من `public/play-store-assets/feature-graphic-1024x500.svg`).
+   - 4 إلى 8 لقطات شاشة حقيقية من الهاتف أثناء اللعب.
+6. **تعبئة السياسات المطلوبة في Play Console**:
+   - رابط صفحة سياسة الخصوصية المنشورة (`public/privacy-policy.html`).
+   - نموذج **أمان البيانات (Data Safety)** (بيانات الحساب، إحصائيات اللعب، المراسلات، عدم بيع البيانات).
+   - استبيان **تصنيف المحتوى (Content Rating)** وتصنيف الفئة العمرية.
+   - توضيح إعلان وجود إعلانات (`Ads`) ومشتريات داخل التطبيق (`In-app purchases`) عند تفعيلهما.
+7. **الاختبار المغلق (Closed Testing)**: للحسابات الشخصية الجديدة في Google Play، يتطلب المتجر مشاركة 12 مختبِراً لمدة 14 يوماً متواصلة قبل فتح زر النشر العام (`Production`).

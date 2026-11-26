@@ -1,4 +1,4 @@
-name: Build Signed Play Store Release (AAB + APK)
+name: Build Play Store Release (Signed AAB)
 
 on:
   workflow_dispatch:
@@ -8,13 +8,18 @@ on:
         required: true
         default: '1.0.0'
       version_code:
-        description: 'Version Code (integer, increment on every Play Store upload)'
+        description: 'Version Code (integer — must increase on every Play Store upload)'
         required: true
         default: '1'
+  push:
+    tags:
+      - 'v*'
 
 jobs:
-  build-release:
+  build-playstore-aab:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout Repository
@@ -24,72 +29,93 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: 'npm'
 
-      - name: Setup Java 21
+      - name: Setup Java 21 (Temurin)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 21
 
+      - name: Setup Gradle Cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Resolve Version Metadata
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "name=${{ inputs.version_name }}" >> "$GITHUB_OUTPUT"
+            echo "code=${{ inputs.version_code }}" >> "$GITHUB_OUTPUT"
+          else
+            TAG_NAME="${GITHUB_REF_NAME#v}"
+            echo "name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+            echo "code=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install Dependencies
         run: npm install --legacy-peer-deps
 
-      - name: Build Production Web Bundle
+      - name: Type-Check & Build Production Web Assets
         env:
           VITE_ADMOB_ANDROID_APP_ID: ${{ secrets.VITE_ADMOB_ANDROID_APP_ID }}
           VITE_ADMOB_INTERSTITIAL_ID: ${{ secrets.VITE_ADMOB_INTERSTITIAL_ID }}
           VITE_ADMOB_REWARDED_ID: ${{ secrets.VITE_ADMOB_REWARDED_ID }}
           VITE_ADMOB_TESTING: 'false'
-        run: npm run build
-
-      - name: Prepare Android Platform
         run: |
-          if [ ! -d "android" ]; then
-            npx cap add android
-          fi
-          npx cap sync android
+          npm run lint
+          npm run build
 
-      - name: Configure Version Code & Version Name
-        run: |
-          sed -i "s/versionCode [0-9]\+/versionCode ${{ inputs.version_code }}/g" android/app/build.gradle
-          sed -i "s/versionName \".*\"/versionName \"${{ inputs.version_name }}\"/g" android/app/build.gradle
+      - name: Sync Web Assets into Capacitor Android Project
+        run: npx cap sync android
 
-      - name: Add google-services.json if provided in Secrets
+      - name: Inject google-services.json (Optional Firebase Native Config)
         if: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 != '' }}
+        shell: bash
         run: |
           echo "${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}" | base64 --decode > android/app/google-services.json
 
-      - name: Decode Android Release Keystore
-        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+      - name: Decode Release Keystore from GitHub Secrets
+        id: signing
+        shell: bash
         run: |
-          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > android/app/release-keystore.jks
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ] && [ -n "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" ] && [ -n "${{ secrets.ANDROID_KEY_ALIAS }}" ] && [ -n "${{ secrets.ANDROID_KEY_PASSWORD }}" ]; then
+            echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > android/app/release-keystore.jks
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            echo "Release signing configured securely from GitHub Secrets."
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Signing secrets are not set yet. Building an UNSIGNED AAB for CI validation only (configure ANDROID_KEYSTORE_* secrets before uploading to Google Play)."
+          fi
 
-      - name: Build Release AAB (Google Play Store) & APK
+      - name: Build Android App Bundle (.aab)
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ steps.signing.outputs.signed == 'true' && 'app/release-keystore.jks' || '' }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           cd android
           chmod +x gradlew
-          if [ -f "app/release-keystore.jks" ]; then
-            ./gradlew bundleRelease assembleRelease \
-              -Pandroid.injected.signing.store.file="$(pwd)/app/release-keystore.jks" \
-              -Pandroid.injected.signing.store.password="${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
-              -Pandroid.injected.signing.key.alias="${{ secrets.ANDROID_KEY_ALIAS }}" \
-              -Pandroid.injected.signing.key.password="${{ secrets.ANDROID_KEY_PASSWORD }}"
-          else
-            ./gradlew bundleRelease assembleRelease
-          fi
+          ./gradlew bundleRelease \
+            -PversionCode=${{ steps.version.outputs.code }} \
+            -PversionName=${{ steps.version.outputs.name }} \
+            --no-daemon
+
+      - name: Verify AAB Signature (When Signing Enabled)
+        if: ${{ steps.signing.outputs.signed == 'true' }}
+        run: |
+          jarsigner -verify -verbose -certs android/app/build/outputs/bundle/release/app-release.aab > /dev/null
+          echo "AAB cryptographic signature verified successfully."
+
+      - name: Clean Up Temporary Secrets on Runner
+        if: always()
+        run: rm -f android/app/release-keystore.jks android/app/google-services.json
 
       - name: Upload Play Store AAB Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: qimat-altahadi-playstore-aab-v${{ inputs.version_name }}
+          name: midan-almarifa-playstore-v${{ steps.version.outputs.name }}-code${{ steps.version.outputs.code }}-${{ steps.signing.outputs.signed == 'true' && 'signed' || 'unsigned' }}-aab
           path: android/app/build/outputs/bundle/release/app-release.aab
           if-no-files-found: error
-          retention-days: 30
-
-      - name: Upload Release APK Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: qimat-altahadi-release-apk-v${{ inputs.version_name }}
-          path: android/app/build/outputs/apk/release/*.apk
-          if-no-files-found: warn
           retention-days: 30
