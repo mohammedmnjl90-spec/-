@@ -593,9 +593,10 @@ export const FriendsAndChatView: React.FC<FriendsAndChatViewProps> = ({
               'Send a friend request via 10-digit Player ID or Username:'
             )}
           </label>
-          <div className="flex flex-col sm:flex-row gap-3">
+          <div className="flex flex-col sm:flex-row gap-3 w-full min-w-0">
             <input
               type="text"
+              autoComplete="off"
               value={friendQuery}
               onChange={(e) => {
                 setFriendQuery(e.target.value);
@@ -606,7 +607,7 @@ export const FriendsAndChatView: React.FC<FriendsAndChatViewProps> = ({
                 'أدخل كود اللاعب (10 أرقام) أو اسم المستخدم...',
                 'Enter 10-digit Player ID or Username...'
               )}
-              className="flex-1 px-4 py-3 rounded-xl bg-[#0B1120] border border-slate-700 focus:border-cyan-400 focus:outline-none text-sm text-white placeholder-slate-500"
+              className="flex-1 min-w-0 w-full px-4 py-3 rounded-xl bg-[#0B1120] border border-slate-700 focus:border-cyan-400 focus:outline-none text-sm text-white placeholder-slate-500"
             />
             <button
               type="submit"
@@ -1081,7 +1082,7 @@ export const FriendsAndChatView: React.FC<FriendsAndChatViewProps> = ({
                   )}
                   maxLength={500}
                   autoComplete="off"
-                  className="flex-1 px-4 py-3 rounded-xl bg-[#111827] border border-slate-700 focus:border-cyan-400 focus:outline-none text-sm text-white placeholder-slate-500"
+                  className="flex-1 min-w-0 w-full px-4 py-3 rounded-xl bg-[#111827] border border-slate-700 focus:border-cyan-400 focus:outline-none text-sm text-white placeholder-slate-500"
                 />
                 <button
                   type="submit"

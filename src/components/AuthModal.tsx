@@ -463,7 +463,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   };
 
   const cardContent = (
-    <div className="max-w-xl w-full bg-[#111827] border border-slate-800 rounded-2xl p-6 md:p-8 space-y-6 shadow-2xl relative">
+    <div className="max-w-xl w-full bg-[#111827] border border-slate-800 rounded-2xl p-4 sm:p-6 md:p-8 space-y-6 shadow-2xl relative overflow-hidden">
       {isModalOverlay && onClose && (
         <button
           type="button"
@@ -709,26 +709,30 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   </div>
                 )}
 
-                <div className="flex items-center gap-2" dir="ltr">
+                <div className="flex items-center gap-2 w-full min-w-0" dir="ltr">
                   <button
                     type="button"
                     onClick={() => setShowLoginCountryPicker((prev) => !prev)}
-                    className="px-3.5 py-3 rounded-xl bg-[#0B1120] border border-cyan-500/40 hover:border-cyan-400 flex items-center gap-2 shrink-0 cursor-pointer"
+                    className="px-2.5 sm:px-3.5 py-3 rounded-xl bg-[#0B1120] border border-cyan-500/40 hover:border-cyan-400 flex items-center gap-1.5 sm:gap-2 shrink-0 cursor-pointer"
                   >
-                    <span className="text-lg">{loginCountry.flag}</span>
-                    <span className="text-sm font-mono-num font-bold text-cyan-400">
+                    <span className="text-base sm:text-lg leading-none">{loginCountry.flag}</span>
+                    <span className="text-xs sm:text-sm font-mono-num font-bold text-cyan-400">
                       {loginCountry.dialCode}
                     </span>
                   </button>
                   <input
                     type="tel"
+                    inputMode="tel"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    spellCheck={false}
                     value={loginPhoneInput}
                     onBlur={() => setLoginPhoneTouched(true)}
                     onChange={(e) => handleLoginPhoneChange(e.target.value)}
                     placeholder={
                       COUNTRY_PHONE_RULES[loginCountry.dialCode]?.exampleLocal || '770000000'
                     }
-                    className={`flex-1 px-4 py-3 rounded-xl bg-[#0B1120] border focus:outline-none text-white placeholder-slate-500 text-sm font-mono-num ${
+                    className={`flex-1 min-w-0 w-full px-3 sm:px-4 py-3 rounded-xl bg-[#0B1120] border focus:outline-none text-white placeholder-slate-500 text-sm font-mono-num ${
                       loginPhoneInput.length > 0
                         ? loginPhoneValidation.valid
                           ? 'border-emerald-500/60 focus:border-emerald-400'
@@ -969,13 +973,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               <input
                 id="player-username"
                 type="text"
+                autoComplete="off"
+                autoCorrect="off"
+                spellCheck={false}
                 value={username}
                 onChange={(e) => {
                   setUsername(e.target.value);
                   if (errorMsg) setErrorMsg(null);
                 }}
                 placeholder={tr(lang, 'أدخل اسم المستخدم', 'Enter username')}
-                className="w-full px-4 py-3 rounded-xl bg-[#0B1120] border border-slate-700 focus:border-cyan-400 focus:outline-none text-white placeholder-slate-500 text-sm"
+                className="w-full min-w-0 px-4 py-3 rounded-xl bg-[#0B1120] border border-slate-700 focus:border-cyan-400 focus:outline-none text-white placeholder-slate-500 text-sm"
                 maxLength={20}
                 required
               />
@@ -1075,16 +1082,20 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
               {contactType === 'phone' ? (
                 <div className="space-y-2">
-                  <div className="flex items-center gap-2" dir="ltr">
+                  <div className="flex items-center gap-2 w-full min-w-0" dir="ltr">
                     {/* Auto Country Flag + Dial Code badge */}
-                    <div className="px-3.5 py-3 rounded-xl bg-[#0B1120] border border-cyan-500/40 flex items-center gap-2 shrink-0 select-none">
-                      <span className="text-lg">{selectedCountry.flag}</span>
-                      <span className="text-sm font-mono-num font-bold text-cyan-400">
+                    <div className="px-2.5 sm:px-3.5 py-3 rounded-xl bg-[#0B1120] border border-cyan-500/40 flex items-center gap-1.5 sm:gap-2 shrink-0 select-none">
+                      <span className="text-base sm:text-lg leading-none">{selectedCountry.flag}</span>
+                      <span className="text-xs sm:text-sm font-mono-num font-bold text-cyan-400">
                         {selectedCountry.dialCode}
                       </span>
                     </div>
                     <input
                       type="tel"
+                      inputMode="tel"
+                      autoComplete="off"
+                      autoCorrect="off"
+                      spellCheck={false}
                       value={phoneInput}
                       onBlur={() => setPhoneTouched(true)}
                       onChange={(e) => handleRegisterPhoneChange(e.target.value)}
@@ -1092,7 +1103,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                         COUNTRY_PHONE_RULES[selectedCountry.dialCode]?.exampleLocal ||
                         '770000000'
                       }
-                      className={`flex-1 px-4 py-3 rounded-xl bg-[#0B1120] border focus:outline-none text-white placeholder-slate-500 text-sm font-mono-num ${
+                      className={`flex-1 min-w-0 w-full px-3 sm:px-4 py-3 rounded-xl bg-[#0B1120] border focus:outline-none text-white placeholder-slate-500 text-sm font-mono-num ${
                         phoneInput.length > 0
                           ? registerPhoneValidation.valid
                             ? 'border-emerald-500/60 focus:border-emerald-400'

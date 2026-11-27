@@ -1120,6 +1120,12 @@ export default function App() {
     activeChatFriendUidRef.current = friendUid;
   }, []);
 
+  const handleConnectionStatusChange = useCallback((online: boolean) => {
+    if (online && profileRef.current) {
+      void storageRepo.syncProfileToFirestore(profileRef.current);
+    }
+  }, []);
+
   const handleUpdateIdentity = (newUsername: string, newCountry: CountryInfo) => {
     if (!profile) return;
     const oldNorm = normalizeUsernameKey(profile.username);
@@ -1405,11 +1411,7 @@ export default function App() {
           <ConnectionIndicator
             lang={lang}
             cloudStatus={cloudStatus}
-            onStatusChange={(online) => {
-              if (online && profile) {
-                void storageRepo.syncProfileToFirestore(profile);
-              }
-            }}
+            onStatusChange={handleConnectionStatusChange}
           />
 
           {isAdmin && (

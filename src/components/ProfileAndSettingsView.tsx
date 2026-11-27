@@ -333,6 +333,9 @@ export const ProfileAndSettingsView: React.FC<ProfileAndSettingsViewProps> = ({
             </label>
             <input
               type="text"
+              autoComplete="off"
+              autoCorrect="off"
+              spellCheck={false}
               value={editUsername}
               readOnly={isIdentityLocked}
               onClick={() => {

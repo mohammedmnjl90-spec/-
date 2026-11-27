@@ -643,12 +643,21 @@ export class StorageRepository {
     lastError: string | null = null,
     isNetworkOffline = false
   ): void {
+    const nextIsOffline = connected ? false : isNetworkOffline;
+    const isUnchanged =
+      this.cloudStatus.connected === connected &&
+      this.cloudStatus.isNetworkOffline === nextIsOffline &&
+      this.cloudStatus.lastError === lastError;
+
     this.cloudStatus = {
       connected,
-      isNetworkOffline: connected ? false : isNetworkOffline,
+      isNetworkOffline: nextIsOffline,
       lastSyncedAtMs: connected ? Date.now() : this.cloudStatus.lastSyncedAtMs,
       lastError,
     };
+
+    if (isUnchanged) return;
+
     for (const listener of this.cloudStatusListeners) {
       listener(this.cloudStatus);
     }
